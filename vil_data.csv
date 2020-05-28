@@ -1,0 +1,16 @@
+village_name,commune,households,people,maj_ethnicity,avg_income,rate_poverty,area_forest,exp_date,exp_time
+8,Huong Hoa,206,839,Kinh,37300,1.45,11.23,24.03.2019,Morning
+Cha Mang,Thuong Lo,82,324,Katu,27000,4.8,694.72,26.03.2019,Afternoon
+6,Thuong Long,76,307,Katu,27450,46.67,62.82,27.03.2019,Morning
+8,Thuong Long,104,480,Katu,27450,27,66.32,27.03.2019,Afternoon
+La Van,Thuong Nhat,86,354,Katu,30000,5.88,91.33,28.03.2019,Morning
+Ta Lu,Thuong Nhat,67,270,Katu,30000,4.76,81.98,28.03.2019,Afternoon
+Ria Ho,Thuong Lo,78,336,Katu,27000,3.8,769,29.03.2019,Morning
+Ta Rung,Huong Son,108,447,Katu,30000,3.7,63.29,30.03.2019,Morning
+Bha Bha,Huong Son,96,388,Katu,30000,5.2,99.45,30.03.2019,Afternoon
+1,Thuong Quang,94,366,Katu,32300,6.3,117.47,31.03.2019,Morning
+5,Thuong Quang,88,338,Kinh,31500,5.6,132.18,31.03.2019,Afternoon
+6,Thuong Quang,71,273,Kinh,32500,1.4,157,01.04.2019,Morning
+Ta Rinh,Thuong Nhat,108,460,Katu,30000,5.56,161.38,01.04.2019,Afternoon
+A2,Huong Son,75,307,Katu,30000,4,76.47,02.04.2019,Morning
+Pa Noong,Huong Son,83,364,Katu,30000,2.4,80,02.04.2019,Afternoon

@@ -1,0 +1,1984 @@
+---
+title: "Supplementary Information for 'Fair payments for effective environmental conservation'"
+author: "Lasse Loft, Stefan Gehrig, Carl Salk, Jens Rommel"
+documentclass: article
+output:
+  bookdown::pdf_document2:
+    fig_caption: yes
+    latex_engine: xelatex
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+header-includes:
+ \pagenumbering{gobble}
+ \usepackage{tocloft}\setlength{\cftbeforesecskip}{5pt}
+ \usepackage[justification=raggedright,labelfont=bf,singlelinecheck=false]{caption}
+ \usepackage{dcolumn} 
+ \usepackage{float}\floatplacement{figure}{H}
+ \usepackage{setspace}\onehalfspacing
+ \usepackage{pdflscape}
+ \newcommand{\blandscape}{\begin{landscape}}
+ \newcommand{\elandscape}{\end{landscape}}
+ \renewcommand{\thetable}{S\arabic{table}}
+ \renewcommand{\thefigure}{S\arabic{figure}}
+fontsize: 12pt
+geometry: top=0.5in, bottom=0.9in, left=0.9in, right=0.9in
+bibliography: references.bib
+csl: cite_style.csl
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.pos = "H")
+
+#load packages
+library(medflex)
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(tableone)
+library(influence.ME)
+library(lme4)
+library(ordinal)
+library(MuMIn)
+library(lmerTest)
+library(plm)
+library(lmtest)
+library(lubridate)
+
+#load functions
+source("function_permutationtest.R")
+source("function_standardcoeff.R")
+
+#define functions
+#...for asterics in regression table
+aster <- function(x){
+  ifelse(x<0.1 & x>=0.05, "*",
+         ifelse(x<0.05 & x>=0.01, "**",
+                ifelse(x<0.01, "***", "")))}
+
+#...for standardizing variables
+standa <- function(x) ( x-mean(x,na.rm=T) ) / sd(x,na.rm=T)
+
+#...for select() function from dplyr
+select <- dplyr::select
+
+#...for getting mediated proportion in natural effect models (original code from Stijn Vansteelandt)
+getMedProp <- function(fitNEM, G=10^5, conf.level=0.95)
+{
+  NEMtable <- summary(neEffdecomp(fitNEM))
+  library(mvtnorm)
+  simVals <- t(rmvnorm(G, mean=NEMtable$coefficients[1:2,1], sigma = NEMtable$vcov[2:3,2:3]))
+  tempQ <- simVals[2,]/colSums(simVals)
+  return(c(mediatedProp=NEMtable$coefficients[2,1]/sum(NEMtable$coefficients[1:2,1]),
+           quantile(tempQ, c( (1-conf.level)/2, 1- (1-conf.level)/2))))
+}
+
+#...for pasting p-values
+p4digits <- function(x){
+  paste("p = ",format(round(x, digits=4), nsmall = 4), sep = "")}
+  
+#import data
+df  <- read_csv("exp_data.csv") #experimental data
+df2 <- read_csv("vil_data.csv") #administrative village data
+df3 <- read_csv("wvs_data.csv") #world values survey data aggregated
+
+#define new variables
+df <- df %>% 
+  mutate(treatment = ifelse(payrate=="400" & grouptype=="equal", "Equal, Low pay rate",
+                            ifelse(payrate=="400" & grouptype=="inequal", "Unequal, Low pay rate",
+                                   ifelse(payrate=="600" & grouptype=="equal", "Equal, High pay rate", "Unequal, High pay rate"))),
+         village_commune = paste(village_name, " (", commune_name, ")", sep =""))
+
+#remove rows of pilot participants and those who withdrew
+df      <- df[df$pilot=="no",]      #clean from pilot
+df_uncl <- df                       #save data including withdrawals
+df      <- df[df$leftsetup=="no",]  #clean from withdrawals
+
+#calculate total bags produced across study villages
+total_bags <- sum(df$bags) + sum(df$training, na.rm=T)
+
+#calculate conservation effort demeaned by treatment
+df$bags_demean <- numeric(nrow(df))
+for (i in seq(1,nrow(df),1)){
+  assigned_i        <- df$treatment[i]
+  df$bags_demean[i] <- df$bags[i]-mean(df$bags[df$treatment==assigned_i])
+}
+
+#clean and prepare columns for modelling
+pca_result <- df %>% 
+  select(grep("item", names(.))) %>% 
+  {ifelse(. == "yes", 1, 0)} %>% 
+  prcomp(.)
+
+df$wealth               <- -pca_result$x[,"PC1"] #reverse sign such that higher value means more wealth
+df$education            <- as.numeric(as.character(with(df, ifelse (!is.na(education) & education == "12+B", 16, education)))) #turn "12 + Bachelors degree" into 16
+df$income               <- df$income/23200 #convert into USD
+df$gender               <- relevel(as.factor(df$gender), ref = "m")
+df$forest_worry_fct     <- as.factor(df$forest_worry)
+df$forest_important_fct <- as.factor(df$forest_important)
+df$forest_concern       <- standa(df$forest_worry) + standa(df$forest_important)
+df$likeability          <- 6-df$likeability #reverse such that higher values mean more likeability
+df$likeability_fct      <- as.factor(df$likeability)
+df$fair                 <- 6-df$fair #reverse such that higher values mean more more fair
+df$fair_fct             <- as.factor(df$fair)
+
+df$accountab            <- df %>%
+  select(grep("vignette", names(.))) %>%
+  mutate(vignette1 = {ifelse(.[,1] == "a", 1, 0)},
+         vignette2 = {ifelse(.[,2] == "b", 1, 0)},
+         vignette3 = {ifelse(.[,3] == "a", 1, 0)},
+         vignette4 = {ifelse(.[,4] == "b", 1, 0)}) %>% rowSums #create score for endorsement of accountability principle for each subject
+
+df$payrate        <- as.character(df$payrate)
+df$village_ID     <- as.character(df$village_ID)
+df$uniqueGroup_ID <- as.factor(paste(df$village_ID, df$group_in_village, sep = "_"))
+df$minsbreak      <- as.numeric(as.character(df$minsbreak))
+df$payoff         <- (as.numeric(as.character(df$payrate)) * df$bags + df$showup)/23200
+
+#define vector for pre-defined socio-demographic control variables
+sociodemos <- c("gender","age","wealth","education","children","income")
+
+#create a dataset that is outlier-adjusted (i.e., excludes outliers)
+outliers   <- boxplot(df$bags[df$payrate=="400" & df$grouptype=="equal"], plot=FALSE)$out
+outliers1  <- df$ID[df$bags %in% outliers & df$payrate=="400" & df$grouptype=="equal"]
+
+outliers   <- boxplot(df$bags[df$payrate=="600" & df$grouptype=="equal"], plot=FALSE)$out
+outliers2  <- df$ID[df$bags %in% outliers & df$payrate=="600" & df$grouptype=="equal"]
+
+outliers   <- boxplot(df$bags[df$payrate=="400" & df$grouptype=="inequal"], plot=FALSE)$out
+outliers3  <- df$ID[df$bags %in% outliers & df$payrate=="400" & df$grouptype=="inequal"]
+
+outliers   <- boxplot(df$bags[df$payrate=="600" & df$grouptype=="inequal"], plot=FALSE)$out
+outliers4  <- df$ID[df$bags %in% outliers & df$payrate=="600" & df$grouptype=="inequal"]
+
+df_r       <- df[!df$ID %in% c(outliers1,outliers2,outliers3,outliers4),]
+
+#set.seed
+set.seed(12345)
+```
+
+\newpage
+\pagenumbering{arabic}
+\newgeometry{margin=0.9in}
+
+# Supplementary Methods {#methods}
+
+## Experimental design and real-world conservation incentives {#design}
+
+Real-effort experiments are a common method in experimental economic research on the role of incentives [@charness_experimental_2018]. They have recently gained popularity in conservation research with natural resource users in the field (e.g., [@nelson_funding_2018]). Acknowledging that economic experiments are abstractions of real-world settings, our aim was to design a task that reflects the real-world setting as much as possible (external validity) while remaining experimentally clean and tractable to allow causal inference (internal validity). Here, we explain how key building blocks of the experimental design – the choice of task (see \@ref(designtask)) and treatments (see \@ref(designtreat)) – resemble features of real-world environmental incentive schemes. Our design aims to test the effect of (in)equity in incentive-based conservation, i.e., the instrumental role that equity can play in shaping outcomes  [@pascual_social_2014].
+
+### Choice of task {#designtask}
+
+Incentives are often provided for the conservation of natural habitats or the generation of “environmental amenities that are public goods” ([@bulte_payments_2008], p. 247). A key step in our research was to choose a task that resembles conservation instruments that provide payments for conducting activities which improve the state of natural resources [@alix-garcia_payments_2018]. We argue that an experiment which measures real effort for conservation is suited for research on incentive-based conservation generally [@loft_effectiveness_2019].
+Globally, there are many examples of payment schemes that incentivize activities such as tree planting [@wunder_revisiting_2015]. In Vietnam’s national Payments for Forest Ecosystem Services program, “participants are not being paid based on outcome in terms of a measured quantity of ES. Rather, the payment is based on labour input that should lead to an increased provision of ecosystem services”, i.e. conducting forest protection activities, such as forest patrolling, reporting of illegal timber logging and hunting, and fighting of forest fires ([@haas_how_2019], p. 206), i.e., conducting forest protection activities, such as forest patrolling, reporting illegal timber logging and hunting, and fighting forest fires  [@mcelwee_hybrid_2020]. China’s Sloping Land Conversion Program (SLCP) provides farmers with in-kind and cash payments in exchange for converting cropland on steep slopes to less erodible forest and grassland [@li_rural_2011]. The payments are linked to allowing forest regeneration, aerial seeding and artificial planting [@liu_ecological_2008]. In Mexico’s Federal Conservation Payments Program, incentivized activities include reforestation [@corbera_institutional_2009], maintenance of existing forest or natural land cover and engagement in land management activities such as “building fences, controlling pests, or patrolling for illegal activity”([@alix-garcia_payments_2018], p. 7016)). In Europe, Agri-Environmental Measures are incentive-based instruments that provide compensation payments to farmers in return for the temporary adoption of, for example, landscape and habitat measures such as planting wildflower strips on the margins of plots in a wide range of agricultural landscapes ([@baylis_agri-environmental_2008], [@uthes_studies_2013], [@feltham_experimental_2015]). Many afforestation and reforestation projects under the UNFCCC Kyoto Protocol Clean Development Mechanism paid for tree-planting activities in developing countries [@kemerink-seyoum_sharing_2018].
+
+For the real-effort experiment, we needed a task that reflects real-world conservation activities, makes effort easily quantifiable and requires rather simple physical effort for which skill or ability would not vary greatly among subjects. Further, the task should produce real-world environmental benefits which distinguishes it from abstract pen-and-paper experiments on payments for ecosystem services in which subjects invest in or harvest hypothetical resources ([@andersson_experimental_2018], [@handberg_pay_2019], [@salk_simple_2017]). We thus chose filling biodegradable bags with fertile soil to grow seedlings for reforestation as an activity that meets all of these requirements. Producing seedlings for reforestation is an activity that is either part of many of the above mentioned conservation programs or an activity directly supporting these actions. In the study region, soil bags are commonly produced and planted by conservation NGOs and tree nurseries. Just as in our task, organizations pay people for filling bags which are then used for afforestation. In our study, we informed subjects prior to the task that all bags they produce would be used for afforestation in the region; they were collected by forest officials after the task. Hence, subjects knew that they were producing a real-world environmental public good and real environmental concerns should therefore affect behavior in the task, besides other factors like payments. Lab-in-the-field experiments that produce real-world public goods are only rarely employed (but see [@gatiso_if_2018] and [@carlsson2015funding] for experiments that fund schools and bridges, respectivaly), in particular in combination with real-effort tasks (but see [@kerr_prosocial_2012]). We have employed a similar real-effort task in a previous study of a different topic, a comparison of equity preferences and effort effects between different payment distribution mechanisms [@loft_effectiveness_2019].
+
+### Choice of treatments {#designtreat}
+
+Besides the task, it was important to design treatments so that they capture the problem of inequities in incentive-based conservation. The randomly-assigned disparity in payment rates within the same group of subjects (high rate vs low rate) needs to reflect payment inequalities found in many real-world programs leading to unjustified or poorly-justified income disparities.
+
+In Vietnam’s national Payments for Forest Ecosystem Services program, payment distribution to households is not clearly specified in the underlying legislation [@loft_whose_2017]. Much is left to be decided on the local level, and “officials have much latitude in recognizing household ownership and access over forests and distributing these funds among and within villages” [@mcelwee_hybrid_2020]. Previous research found that people are paid differently for the same conservation activities like forest patrolling, reporting illegal timber logging or hunting activities and fighting forest fires. One reason for this is that the amount of funds that any commune receives depends on its forest area, and payment levels per household are therefore related to the ratio of forest area to population in a given commune [@mcelwee_hybrid_2020]. A second reason is that payment rate calculation considers the type of forest (whether it is special-use, protection or production forest), and the origin of forest (whether it is natural or planted). Depending on the forest classification, different payments are being delivered, while work effort for patrolling these forests is the same [@haas_how_2019]. Overall, “the result is that the level of payments to participating households can vary significantly, even between neighbouring communes or even within a village” ([@mcelwee_hybrid_2020], p. 265-266).
+While payment inequality on very local scales is seen in Vietnam, less extreme examples are common elsewhere. For instance, in the case of SLCP, different rates were paid for the same activities, depending on whether the activity was being conducted in the Yangtze River Basin or the upper and middle reaches of the Yellow River Basin [@liu_ecological_2008]. He and Sikor have explained this difference by noting different opportunity costs in these areas [@he_notions_2015]. Further, the duration of the payments differed according to which type of forest was planted. Payments were delivered for 8 years if “ecological forests” were planted and for 5 years or 2 years if “economic forests” or grasses were planted [@bennett_chinas_2008]. While these payment differences were made transparent on paper and justified by different opportunity costs, early studies on SLCP implementation find evidence that there were systematic differences in local implementation. Uchida et al. [@uchida_are_2007] state that “the actual delivery of payments often falls short (…) in some villages, (…)” (p. 600). Among the listed reasons for full compensation not reaching participating farmers are that “village officials may deduct labor cost to plant trees on the farmer’s program plots. They may deduct back-taxes owed by the farmer. In other cases, some plots are retired before being fully certified under the program”. Bennett [@bennett_chinas_2008] found that about two-thirds of the 360 surveyed households could not “choose what kinds of trees to plant on their enrolled land” (p. 706-707). Thus, since the total payment depended on the type of forest planted, income differences resulted at the village level, which the villagers had no control over.
+
+The occurrence of payment inequality in the cases of Vietnam and China are only partially due to unintended consequences of program designs; payment differences within the same scheme are to some degree desired and justified. Yet, during practical implementation on the ground, unjustified payment inequality often occurs even when it has not been intended by legislation (see [@pascual_social_2014] for additional examples of inequity in incentive-based conservation).
+Payment inequality in incentive-based conservation is not restricted to the context of developing countries and economies in transition, but commonplace in industrialized countries too. In The European Union’s Agri-Environmental Measures scheme, “payment levels can vary substantially from one Member State to another for a range of reasons including differences between sites and the fact that not all Member States pay the full amount of income foregone and costs incurred” ([@european_comission_agri-environment_2005], p. 10). Within EU member states that have a federal structure, such as Germany, planting of wildflower strips is financially compensated differently depending on the total budget available in the federal state. As a consequence, neighboring farms (in different states) can receive different payments for the same activity.
+
+## Data collection {#datacol}
+
+### Village selection process {#villselect}
+
+Our study region was Nam Dong district in Thừa Thiên Huế Province in Central Vietnam. The province is part of the Central Annamite Ecoregion, a global biodiversity hotspot. The district was selected, because it is located in the buffer zone of Bạch Mã National Park, the center of the last remaining rain forest in Central Vietnam. The area has been threatened by deforestation and defaunation  (in the survey, `r round(sum(df$people_logging=="yes")/nrow(df[!is.na(df$people_logging),])*100,0)`% and `r round(sum(df$people_hunting=="yes")/nrow(df[!is.na(df$people_hunting),])*100,0)`% of subjects responded that they know people in their village who go logging or hunting in the forest, respectively) and is an important target for national and international biodiversity conservation initiatives. For the selection of experimental sites, we collected socio-demographic background data from 60 villages in the 11 communes of Nam Dong district (see \@ref(sumstat)). These villages were filtered according to the criteria of having more than 250 inhabitants and having forest land enrolled in the national Payments for Forest Ecosystem Services (PFES) progam. From the resulting subset (N = 33), 15 villages were randomly selected.
+One village served as a pilot to test that the task is feasible and understood, calibrate payments and train staff with a smaller sample (N = 14 subjects) and a single treatment only (i.e., we did *not* collect data on effects of treatment manipulations in the pilot). Consequently, we conducted 14 full sessions in 14 villages. In cases where sampled villages were geographically close, we scheduled sessions for the same day or consecutive day when possible to avoid contamination and spillover effects between villages.
+To meet the minimum pre-specified sample size of N = 432 (see \@ref(regapprov)) and have equally-sized treatment groups of eight in each village, we recruited 32 participants in each of the 14 villages.
+
+### Schedule of experiments {#schedule}
+
+In total, the visit to a village, including the preparation of the task and survey, the debriefing, and the clean-up took about 3.5 hours on average. We conducted morning and afternoon sessions. The morning sessions started at around 8 am, the afternoon sessions at around 2 pm. Table \@ref(tab:sched) reports date and time for all villages where the experiment was conducted.
+
+```{r sched}
+df2_sess          <- df2[,c(1, 2, ncol(df2) - 1, ncol(df2))]
+df2_sess$exp_date <- lubridate::dmy(df2_sess$exp_date)
+
+df2_sess %>% kable(booktab = T, linesep = "", digits = 1, align = "l",
+               caption = "Sampling schedule for the 14 experimental sites and one pilot site (first row).",
+               col.names = c("Village", "Commune", "Date", "Time")) %>%
+   kable_styling(latex_options = c("HOLD_position"), position="left")
+```
+
+### Enumerators {#enum}
+
+Six enumerators, one group facilitator, and one driver were subcontracted and selected by our local implementation partner WWF Vietnam. This team accompanied the principal research team in the field (L.L., J.R., and one research assistant). The enumerators spoke English and Vietnamese. All of them had a background in forestry and/or resource economics and most of them had experience working in the field. Prior to visiting the study villages, a four-day training was conducted with enumerators. One village visit was used to pilot the procedure. Afterwards, a debriefing took place with enumerators, the procedure was revised, and additional training and adjustments of field procedures took place.
+
+### Collaboration with village heads {#vheads}
+
+All Vietnamese villages have an elected official, the so-called village head whom we used as entry points to the community. This had the advantage that a sample of 32 members of a village was readily available for participation in each village.
+Village heads were called by the local assistants three days prior to conducting the experiments. Village heads were informed that an international team of researchers would conduct an exercise related to reforestation activities and a brief survey. They were not informed about details or research questions. Village heads were instructed that the activity would require:
+
+- 32 participants
+- place(s) in the village were 32 participants could meet and work with sufficient space;
+- participants would get paid for the work and the participation in the survey;
+- two villagers would need to assist the research team with the setup of soil piles, which would be delivered the day prior to the visit.
+
+### Task setup {#setup}
+
+On the day of the experiment, the soil preparation task was prepared for four groups of eight participants separately (see Figure 2 in main text for a schematic drawing and Figure \@ref(fig:setupexample) for examples of a group's task setup). Groups were located at some distance to each other to prevent communication or any other influences across treatments.
+Each group's task setup consisted of...
+
+-	...a circle of 8 plastic chairs for participants to sit on
+-	...eight boxes which fit 20 packed soil bags, one next to each chair
+-	...a pile of 0.5 m³ of soil in the middle of the circle
+-	...a large clock visible to all participants of the group
+-	...a bucket of water and paper towel for washing hands
+-	...a table with water and snacks next to the circle
+
+The areas where tasks were conducted were generally located in the shade to ensure similar working conditions for all groups.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=4in]{imageTasksetup.png}
+\caption{Examples of task setups for two groups in two different villages.}
+\label{fig:setupexample}
+\end{figure}
+
+### Sampling of subjects in the village {#sampling}
+
+Village heads informed villagers that 32 people would be able to participate in the task. A downside of this is that the selection process was out of our direct control. Note that randomization was unaffected by the selection process. Villagers were excluded if they were drunk, underage, or could not commit themselves to finish the task and the survey.
+
+### Experimental procedure {#exp}
+
+After arriving at the village, the group facilitator got in contact with the village head who gathered the participants. Then the facilitator introduced the research team and the enumerators to the participants. This followed a standardized format (see \@ref(instr)). After the introduction, an overview of the planned task was provided, it was explicitly stated that the task would be paid, and consent of participation was obtained (see \@ref(consent)). Consent forms were distributed and had to be signed by all participants. In case of illiteracy, the form was read aloud to participants, and the signature was substituted by a fingerprint. Note that `r sum(df_uncl$leftsetup=="yes")` subjects withdrew their participation during the task and left the experiment early without survey and payment for performance, but received the show-up fee (for details, see Table \@ref(tab:withd)). These subjects did not comply with the protocol and were removed from the dataset for analysis, as specified in the pre-registration. No personal task or survey data for participants who withdrew from the experiment was retained.
+
+```{r withd}
+df_uncl %>%
+  filter(leftsetup == "yes") %>%
+  select(ID, treatment, comm_subj) %>%
+  kable(booktab = TRUE, linesep = "", align = "l",
+        caption = "Description for participants who withdrew participation during the experiment.",
+        col.names = c("ID",
+                      "Treatment",
+                      "Comments on participant by enumerators")) %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left")
+```
+
+In the next step, detailed instructions on the soil bag preparation task were provided verbally in Vietnamese by the facilitator (see \@ref(instr)).
+After the demonstration of the task, each of the 32 participants drew a closed envelope with ID numbers from a pile of shuffled envelopes. Each of the four enumerators was randomly assigned to a group consisting of eight ID numbers (at this time being unaware of the group's treatment). The other two enumerators helped out with other tasks in the field, monitored rule enforcement and took notes of peculiarities among participants' behavior (e.g., exceptionally high or low work performance and the apparent reason for this, extensive snack consumption, extensive breaks taken, stated reasons for withdrwal from the experiment).
+Within the four separate groups, the procedure of soil bag packing was explained again. It was shown how to put the soil bags in the individual boxes and where to unload the individual boxes after 20 soil bags were reached.
+To help participants get familiar with the activity, a five minutes training run was conducted. Participants were instructed that they would not get paid for the bags produced in the training run. After the training run, the number of produced bags was recorded. These bags were collected and subsequently used for reforestation. This training run served several purposes. First, it assured homogeneous quality of produced bags. Second, the data are useful to calibrate baseline performance to reduce noise in the estimates. This is particularly helpful to identify – among other things – gender effects after treatment, because we can rule out that the performance was different before treatment due to reasons not related to the monetary incentives.
+After the training run, the facilitator provided the enumerator with eight closed envelopes which contained information on the payment participants would receive for each bag they produce (see \@ref(infosheets)). This procedure was chosen to make the treatment and potential pay differences more salient to participants.  Then, enumerators showed all eight envelopes and, depending on the treatment, they told the participants that
+
+-	...in all eight envelopes, there will be a 600 Vietnamese Dong (VND) rate per bag (group 1)
+-	...in all eight envelopes, there will be a 400 VND rate per bag (group 2)
+-	...in four envelopes, there will be a 400 VND rate per bag and in four envelopes there will be a 600 VND rate per bag (groups 3 and 4)
+
+Group members were asked to draw one of these closed envelopes and read about their payment. Illiterate people were helped by enumerators in private.
+To prevent communication between the groups, groups were placed at least four meters away from each other. Furthermore, participants were instructed not to talk with participants from other groups, which could be prevented succesfully. Communication within groups was allowed (`r round(sum(df$chat=="yes",na.rm=T)/nrow(df[!is.na(df$chat),])*100,0)`% of participants reported in the survey that they talked to others. This made the task more realistic and allowed inidividuals to talk about their payments, further increasing salience of the treatments (`r round(sum(df$chat_pay=="yes",na.rm=T)/nrow(df[!is.na(df$chat_pay),])*100,0)`% of participants reported in the survey that they talked to others about their pay rates; see \@ref(sumstat) for summary by treatment).
+
+Enumerators responsible for a group conducted the counting of prepared soil bags during and at the end of the task. Each group member who had produced 20 soil bags and placed them in her box was asked to get up, showed the box with the bags to the group's enumerator, unloaded the bags from her box, and went back to her seat to continue soil bag production. This way, the enumerator counted the bags produced by each subject ideally in blocks of 20 during the task. Yet, the enumerator did count each bag in the boxes as participants occasionally put fewer or more than 20 bags into their boxes.
+
+After the 60 minutes of the task, subjects were instructed to stop working, and the enumerator counted the remaining number of bags that were placed in the individual box. The total number of bags produced was written down by the enumerator on a group's results sheet that was collected by the team of principal researchers.
+
+After the task, participants remained seated in their groups and enumerators conducted the survey (see \@ref(surv)) by interviewing the participants, i.e. reading out the questions and marking the answers. At no point were names of the participants recorded.
+
+For payments, each group's result sheet was handed over to an assistant not involved in the supervision of the task. This assistant calculated of the money earned (i.e., number of bags produced times pay rate plus the show-up fee). The assistant then prepared an envelope with an ID number that contained the cash payment for each subject. These envelopes were handed over to another assistant who was not involved in the group supervision to distribute them among participants. This way, the payment was double blind.
+
+After the surveys were conducted and the payments were distributed, a debriefing by the research staff was offered. Besides the general topic of forestry in the area, the purpose of the experiment, i.e., studying the effects of inequitable payments on the effectiveness of conservation policies, was revealed, explained, and discussed.
+To ensure the important design feature of tangible environmental benefits in our experiment, all soil bags were handed over to a local forest management organization which used them for reforestation activities in the region. This was known to all participants. Across all 14 study villages, $`r as.integer(total_bags)`$ soil bags were produced in our experiments, including those from training runs.
+
+### Consent form {#consent}
+
+The consent form had the following wording:
+
+We want to conduct an activity with you as part of our research on local forestry. We offer you to take part in a task that can help to protect forests and you will be paid for it. Many different things are needed to protect forests. One important activity is to plant new trees which must be prepared. The work we will pay you for consists of the packing of soil bags for reforestation/conservation. Please note that you cannot take part in the study if you are below 18 years of age.
+
+In total, our activity will last approximately 2.5 hours. By showing up here, you have already earned 30,000 Dong, but you can earn more if you participate in the activity. You will be paid per soil bag packed.
+Your participation is fully voluntary. You cannot lose any money. We record no personal identifying information like names, phone numbers etc. No information we collect in the activity can be linked to your personal identity. All data will be used only for research purposes and in anonymous form.
+
+After the activity, we would like to ask you some questions in a questionnaire. This will also be anonymous, and you can skip any questions that you would not like to answer. After the activity, you will have the opportunity to talk about it with us.
+If you agree to participate, please raise your hand now, and sign the sheet that is prepared for you. If you would not like to participate, you can leave the activity now and keep the 30,000 Dong you have earned already. If you have further questions, please feel free to ask now.
+
+Note that you can also leave the activity at any time after having agreed to participate. In that case, you can only keep the 30,000 Dong you have earned by now.
+
+I have read (or it has been read out for me) and understood the content of the study, and I give my consent to participate.
+
+### Payment information sheets {#infosheets}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=3.5in]{sheetEqual.png}
+\caption{Information sheet about own payment and payment of others in a group with equal pay rates, handed to participants in closed envelopes (left: sheet for high pay rate; right: sheet for low pay rate).}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=3.5in]{sheetUnequal.png}
+\caption{Information sheet about own payment and payment of others in a group with unequal pay rates, handed to participants in closed envelopes (left: sheet for high pay rate; right: sheet for low pay rate).}
+\end{figure}
+
+### Instructions {#instr}
+
+Welcome everybody! We are a group of researchers, consisting of two researchers from Europe, and seven assistants. We will introduce them to you.
+
+*- Introduce staff with names*
+*- Read out consent form*
+*- Show consent form and collect signatures*
+*- Distribute randomized envelopes with IDs to participants*
+
+We will explain the task now for which we will pay you. Please raise your hand at any time if you have a question or are unsure whether you understood what we said. The task will be the preparation of soil bags. Empty bags need to be filled with soil such that seedlings can be put into them later and they can be planted. Thus, the bags will help local forest officers to rebuild forests. This makes it important that the bags are of good quality. We will show you how to prepare a soil bag. Your payment will depend on how many bags of good quality you produce.
+
+*- Demonstrate soil bag preparation and storage in box*
+
+Each one of you will work on this task. Next to your seat, you can see a cardboard box in which you will place the prepared bags.
+
+Each of you packs the soil bags into the small boxes. Pack 20 soil bags in the small box. Then you go to the assistants and show their box with the 20 soil bags and your ID number to the assistant. The assistant will note the number. Then you pack the 20 soil bags from the small box into the big box and show the empty small box to the assistants. You go back to your place and pack the next soil bags.
+You will have 60 minutes to work on the preparation of such bags to earn money. After the 60 minutes, we will collect all of your bags, count them, and pay you with the amount you earned for the bags you prepared. We will carefully count the bags which you produce, so you do not have to take care of this. The bags will be given to the local forest officials. Importantly, nobody, neither we nor them, will know who produced how many bags, because we do not record your names. It is fully up to you how much of the task time you want to work to earn money. We will only count the bags you produced. Of course, you can take breaks if you want to and have drinks.
+
+You will be split into four smaller groups for the task. The groups will be seated some distance away from each other, so you can chat with people in your group while working, but not with people who are in other groups. Remember that although you work in a group, each of you will be paid individually and only for the bags produced by yourself. It does not matter for your payment how many bags the others in your group prepare. We will show you a sheet of paper where you can see which IDs are in which group. After you gathered into the four groups by showing your ID to us, please follow the assistant to the working place with your number. When you are seated in your group, you will get information on the payment which you receive for each bag you prepare.
+
+*- Split participants into groups*
+
+We will now conduct a short training phase of soil bag packing for 5 minutes. You are not getting paid for the bags you prepare within these 5 minutes. We just want everybody to get familiar with the task and want you to have the opportunity to learn how to prepare bags of good quality.
+
+*- Conduct training run*
+
+We will now distribute envelopes in which you find information on the payment you will receive from us for each bag you produce.
+
+*- Show closed envelopes to group*
+*- Tell about payment rate distribution in the group*
+
+The payment information in your envelopes applies to you, independent of what other people have in their envelopes.
+
+*- Distribute randomized payment rate envelopes within groups by letting them draw*
+*- Remind participants that they can talk within the group, not between groups*
+*- Remind participants of water and snacks and that they can take breaks*
+*- Run task for 60 minutes*
+
+While we calculate your payments according to the number of bags that have been packed, we would ask you to participate in a brief survey where you answer some questions. The assistants will come to you individually. Let us know when you do not want to respond to a question.
+
+## Survey {#surv}
+
+For each participant in the experiment, village, date and ID were recorded and the following questions were asked. Question 23 presents vignettes adapted from @konow_positive_1996 which were further explained with visual aids (Figure \@ref(fig:vignaid)).
+
+
+1. Please indicate your gender
+2. How old are you?
+3. Which ethnicity do you belong to?
+4. What is a normal month's income for you?
+5. What is your major source of income?
+6. How many years of formal education did you receive?
+7. Please indicate which of the following items can be found in your household
+    + Motorcycle
+    + Cell phone
+    + TV
+    + Fridge
+    + Gas stove
+8. How many children (15 years or younger) are living in your household?
+9. Have you prepared seedling bags on another occasion before?
+10. How difficult/exhausting was the preparation of seedling bags for you?
+    + Very difficult
+    + Somewhat difficult
+    + Undecided
+    + Not so difficult
+    + Not difficult at all
+11. How did you like the snacks and drinks we provided?
+    + Very much
+    + Somewhat
+    + Undecided
+    + Not so much
+    + Not at all
+12. What do you think, how much time of the 60 minutes did you spend *not* filling bags, but doing something else?
+13. Did you chat with the other people while you were working?
+14. If you chatted with the other people while working, did you talk about how much you and others earn?
+15. Did you know the pay rate of all other people in your group?
+16. How fair do you think your own payment rate was?
+    + Very fair
+    + Somewhat fair
+    + Undecided
+    + Not so fair
+    + Not fair at all
+17. Why and what do you think about it?
+18. How worried are you about the future of the forest?
+    + Not worried at all
+    + Not so worried
+    + Undecided
+    + Somewhat worried
+    + Very worried
+19. How important is the forest for the future of you and your family?
+    + Not important at all
+    + Not so important
+    + Undecided
+    + Somewhat important
+    + Very important
+20. Do you take part in patrolling, monitoring, firefighting or any other activities for the protection of the forest?
+21. Are there people in your village who are logging trees from the forest?
+22. Are there people in your village who go hunting in the forest?
+23. Imagine the following four scenarios:
+    + Person A and person B are identical in terms of physical and mental abilities. They become lost in an uninhabited forest where the only food is mango. They can collect as many mangos as they want by picking them from the trees and throwing them into a pile. In this way, person A picks 12 mangos and person B picks 8 mangos per day. Person A takes from the pile the 12 mangos he picked leaving person B with the 8 which B picked. This is
+      - Fair *(Note for reader: this response is consistent with the accountability princinple)*
+      - Unfair
+    + Person A and Person B become lost in an uninhabited forest where the only food is mangos. They can collect as many mangos as they want by picking them from the trees and throwing them into a pile. A and B are identical in terms of physical and mental abilities except that A was born with one hand and B with two. Together they pick a total of 20 mangos per day, but because of his condition A picks fewer mangos per day than B. B takes 12 mangos from the pile leaving 8 for A. This is
+      - Fair
+      - Unfair *(Note for reader: this response is consistent with the accountability princinple)*
+    + Person A and person B become lost in an uninhabited forest where the only food is mangos. They can collect as many mangos as they want by picking them from the trees and throwing them into a pile. Person A and person B are identical in terms of physical and mental abilities except that person A was born with one hand and person B with two. Together they pick a total of 20 mangos per day, but because of his condition person A picks fewer mangos per day than person B. B takes 10 mangos from the pile leaving 10 for A. This is
+      - Fair *(Note for reader: this response is consistent with the accountability princinple)*
+      - Unfair
+    + Person A and person B become lost in an uninhabited forest where the only food is mangos. They can collect as many mangos as they want by picking them from the trees and throwing them into a pile. The two men are identical in terms of physical and mental abilities except that person A takes 5 hours to pick the mangos while B takes 4 hours because person A chooses to work at a slower pace. Nevertheless, they pick 9 mangos each for the total of 18. A takes 10 mangos from the pile leaving 8 for B. This is
+      - Fair
+      - Unfair *(Note for reader: this response is consistent with the accountability princinple)*
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=7in]{sheetScenarios.png}
+\caption{Visual aids for vignettes 1-4 of question 23 in the survey (Vietnamese).}
+\label{fig:vignaid}
+\end{figure}
+
+## Pre-registration and ethical approval {#regapprov}
+
+All major hypotheses on conservation effort, model specification, the set of control variables and the outlier adjustment method were pre-registered (2019-03-22) before data collection at the pilot site started (2019-03-24, see Table \@ref(tab:sched)). Ethical approval was obtained.
+
+Link to pre-registration document at AsPredicted.org:
+
+*<http://aspredicted.org/blind.php?x=k4ij32>*
+
+Note that we deviated from the pre-registration in three small aspects. First, data was collected in only 14 instead of 15 randomly selected villages (holding constant the pre-specified total sample size of subjects), because one village served as pilot for testing and training the procedures in the field. We employed no treatment manipulations in the pilot village (see \@ref(villselect)). Second, prior to analysis, we chose to model between-village variation with random effects (fitted via Restricted Maximum Likelihood approximation) instead of fixed effects. This is preferable when the predictor (here: treatment) is uncorrelated with the cluster (here: village), which we achieved due to randomization at the village level. Further, village-specific intercepts in our data can be viewed as a random sample from a larger population of village-specific intercepts (due to the random village selection procedure, see \@ref(villselect)). Random effects use this information by modelling village-level intercepts as draws from a Normal distribution (shrinkage), improving estimation and efficiency. Third, instead of employing the variables *Forest worrying* and *Forest importance* (both measured in the survey, see \@ref(surv))), as separate covariates variables in the respective models, we use the sum of their standardized scores as a measure of *Forest concern* (see Models 3, 6, 7, 8 in Tables \@ref(tab:noadj) to \@ref(tab:cluster) in \@ref(treateffortmod)). This was decided post hoch due to their high collinearity (r = `r  round(cor.test(df$forest_worry, df$forest_important)$estimate,2)`) and the small variance in participants' responses (see Table \@ref(tab:aggre)). It improves model convergence and the estimation of the effect of self-reported environmental concern but does not affect estimated treatment effects.
+
+Link to ethical approval at German Association for Experimental Economic Research e.V.:
+
+*<https://gfew.de/ethik/FyVXvL4E>*
+
+## Descriptive statistics for villages and participants {#sumstat}
+
+Table \@ref(tab:villinfo) shows village information. Tables \@ref(tab:aggre) and \@ref(tab:split) show descriptive statistics for all survey variables used in the analyses,
+training run performance and payoff, both aggregated and split by treatment, respectively. As expected under randomization, all basic socio-demographic variables were balanced across treatments as indicated by p-values from ANOVA (continuous variables) and Chi-square tests (categorical variables) for gender (p = `r  round(chisq.test(table(df$gender, df$treatment))$p.value,2)`), age (p = `r  round(anova(lm(df$age ~ df$treatment))["df$treatment","Pr(>F)"],2)`), education (p = `r  round(anova(lm(df$education ~ df$treatment))["df$treatment","Pr(>F)"],2)`), children (p = `r  round(anova(lm(df$children ~ df$treatment))["df$treatment","Pr(>F)"],2)`), income (p = `r  round(anova(lm(df$income ~ df$treatment))["df$treatment","Pr(>F)"],2)`) and posession of household items motorcycle (p = `r  round(chisq.test(table(df$item_moto, df$treatment))$p.value,2)`), cell phone (p = `r  round(chisq.test(table(df$item_phone, df$treatment))$p.value,2)`), TV (p = `r  round(chisq.test(table(df$item_TV, df$treatment))$p.value,2)`), fridge (p = `r  round(chisq.test(table(df$item_fridge, df$treatment))$p.value,2)`) and gas stove (p = `r  round(chisq.test(table(df$item_stove, df$treatment))$p.value,2)`).
+
+```{r villinfo}
+df2$avg_income <- df2$avg_income/23200
+df2_red        <- df2[,-c(ncol(df2), ncol(df2)-1)]
+names(df2_red) <- c("Village", "Commune", "No. of households", "Population", "Ethnic majority",
+                    "Avg. daily income (USD)", "Poverty rate (%)", "Forest area under PFES (ha)")
+ 
+df2_red %>% kable(booktab = T, linesep = "", digits = 1, align = "l",
+                  caption = "Village information for the 14 experimental sites and one pilot site (first row). Village information was collected in January and February 2019 from communal administrative records (PFES: Payments for Forest Ecosystem Services).") %>%
+  kable_styling(latex_options = c("scale_down", "HOLD_position"))
+```
+
+
+```{r aggre}
+#table with summary data aggregated
+tableOne_sum <- print(CreateTableOne(data = df[,c(sociodemos[!sociodemos=="wealth"],
+                                            "item_moto",
+                                            "item_phone",
+                                            "item_TV",
+                                            "item_fridge",
+                                            "item_stove",
+                                            "forest_worry_fct",
+                                            "forest_important_fct",
+                                            "likeability_fct",
+                                            "fair_fct",
+                                            "minsbreak",
+                                            "bagsbefore",
+                                            "accountab",
+                                            "protect",
+                                            "chat_pay",
+                                            "training",
+                                            "payoff")]), noSpaces = T, printToggle = F)
+
+df_sum <- tibble(
+  "Variable" = rownames(tableOne_sum),
+  "Result"   = as.vector(tableOne_sum),
+  "Survey question" = c("-",
+                        "1", #gender
+                        "2", #age
+                        "6", #education
+                        "8", #children
+                        "4", #income
+                        rep("7",5), #household items
+                        rep("18",5),#forest worrying
+                        rep("19",5),#forest importance
+                        rep("11",6),#snacks likeability
+                        rep("16",6),#fairness
+                        "12",#break minutes
+                        "9", #task experience
+                        "23",#accountability
+                        "20",#protection
+                        "14",#chat about pay
+                        "-",
+                        "-"
+                        ))
+
+df_sum <- df_sum[df_sum$Result!="",]
+
+df_sum$Variable <- c("N", "Female (N, %)", "Age (mean, SD)", "Education (years) (mean, SD)",
+                     "Children (mean, SD)", "Income (USD per month) (mean, SD)",
+                     "Household item: Motorcycle (N, %)", "Household item: Cell phone (N, %)",
+                     "Household item: TV (N, %)", "Household item: Fridge (N, %)",
+                     "Household item: Gas stove (N, %)",
+                     #"Forest worrying (N, %)",
+                     "Not so much", "Undecided", "Somewhat", "Very much",
+                     #"Forest importance (N, %)",
+                     "Not so much", "Undecided", "Somewhat", "Very much",
+                     #"Likeability of snacks (N, %)",
+                     "Not at all", "Not so much", "Undecided", "Somewhat", "Very much",
+                     #"Fairness own pay rate (N, %)",
+                     "Not at all", "Not so much", "Undecided", "Somewhat", "Very much",
+                     "Reported time not working (min) (mean, SD)",
+                     "Prior experience task (N, %)",
+                     "Endorsement of accountability principle (0-4) (mean, SD)",
+                     "Participation in forest protection (N, %)",
+                     "Talked to others in group about pay rate (N, %)",
+                     "Training run (mean, SD)",
+                     "Payoff (USD) (mean, SD)")
+
+df_sum %>% kable(booktab = T, linesep = "", align = "l",
+               caption = "Summary of descriptive statistics for all survey variables used in the analyses, training run performance and payoff. Instead of the score 'Household wealth' with mean = 0 and SD = 1 from a principal component analysis (PCA), household items that went into PCA are shown one by one. The two separate variables 'Forest worrying' and 'Forest importance' are shown instead of the sum of their standardized scores 'Forest concern'.") %>%
+   kable_styling(latex_options = c("HOLD_position"), position="left", font_size = 9) %>%
+   pack_rows("Forest worrying (N, %)", 12,15) %>%
+   pack_rows("Forest importance (N, %)", 16,19) %>%
+   pack_rows("Likeability of snacks (N, %)", 20,24) %>%
+   pack_rows("Fairness own pay rate (N, %)", 25,29)
+```
+
+```{r split}
+#table with summary data by treatment
+df_sum_split <- df %>%
+  group_by(treatment) %>%
+  summarise("N"                                   = length(gender),
+            "Female (N)"                          = sum(gender=="f"),
+            "Age (mean, SD)"                      = paste0(round(mean(age,na.rm=T),1), " (", round(sd(age,na.rm=T),1), ")"),
+            "Education (years) (mean, SD)"        = paste0(round(mean(education,na.rm=T),1), " (", round(sd(education,na.rm=T),1), ")"),
+            "Children (mean, SD)"                 = paste0(round(mean(children,na.rm=T),1), " (", round(sd(children,na.rm=T),1), ")"),
+            "Income (USD per month) (mean, SD)"   = paste0(round(mean(income,na.rm=T),1), " (", round(sd(income,na.rm=T),1), ")"),
+            "Household item: Motorcycle (N)"      = sum(item_moto=="yes"),
+            "Household item: Cell phone (N)"      = sum(item_phone=="yes"),
+            "Household item: TV (N)"              = sum(item_TV=="yes"),
+            "Household item: Fridge (N)"          = sum(item_fridge=="yes"),
+            "Household item: Gas stove (N)"       = sum(item_stove=="yes"),
+            "Forest worrying - Not so much"       = sum(forest_worry==2),
+            "Forest worrying - Undecided"         = sum(forest_worry==3),
+            "Forest worrying - Somewhat"          = sum(forest_worry==4),
+            "Forest worrying - Very much"         = sum(forest_worry==5),
+            "Forest importance - Not so much"     = sum(forest_important==2),
+            "Forest importance - Undecided"       = sum(forest_important==3),
+            "Forest importance - Somewhat"        = sum(forest_important==4),
+            "Forest importance - Very much"       = sum(forest_important==5),
+            "Likeability of snacks - Not at all"  = sum(likeability==1,na.rm=T),
+            "Likeability of snacks - Not so much" = sum(likeability==2,na.rm=T),
+            "Likeability of snacks - Undecided"   = sum(likeability==3,na.rm=T),
+            "Likeability of snacks - Somewhat"    = sum(likeability==4,na.rm=T),
+            "Likeability of snacks - Very much"   = sum(likeability==5,na.rm=T),
+            "Fairness own pay rate - Not at all"  = sum(fair==1,na.rm=T),
+            "Fairness own pay rate - Not so much" = sum(fair==2,na.rm=T),
+            "Fairness own pay rate - Undecided"   = sum(fair==3,na.rm=T),
+            "Fairness own pay rate - Somewhat"    = sum(fair==4,na.rm=T),
+            "Fairness own pay rate - Very much"   = sum(fair==5,na.rm=T),
+            "Reported time not working (min) (mean, SD)"               = paste0(round(mean(minsbreak,na.rm=T),1), " (", round(sd(minsbreak,na.rm=T),1), ")"),
+            "Prior experience task (N)"                                = sum(bagsbefore=="yes",na.rm=T),
+            "Endorsement of accountability principle (0-4) (mean, SD)" = paste0(round(mean(accountab,na.rm=T),1)," (", round(sd(accountab,na.rm=T),1), ")"),
+            "Participation in forest protection (N)"                   = sum(protect=="yes",na.rm=T),
+            "Talked to others in group about pay rate (N)"             = sum(chat_pay=="yes",na.rm=T),
+            "Training run (mean, SD)"                                  = paste0(round(mean(training,na.rm=T),1), " (", round(sd(training,na.rm=T),1), ")"),
+            "Payoff (USD) (mean, SD)"                                  = paste0(round(mean(payoff,na.rm=T),1), " (", round(sd(payoff,na.rm=T),1), ")")
+             ) %>%
+  ungroup() %>%
+  t(.)
+
+df_sum_split <- as.data.frame(df_sum_split[-1,])
+colnames(df_sum_split) <- sort(unique(df$treatment))
+
+df_sum_split %>% kable(booktab = T, linesep = "", align = "l",
+               caption = "Summary of descriptive statistics split by treatment.") %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left") %>%
+  pack_rows("Forest worrying (N)", 12,15) %>%
+  pack_rows("Forest importance (N)", 16,19) %>%
+  pack_rows("Likeability of snacks (N)", 20,24) %>%
+  pack_rows("Fairness own pay rate (N)", 25,29)
+
+```
+
+## Statistical outliers {#outlier}
+
+Real-effort experiments are prone to high variance in effort compared to stated-effort experiments [@charness_experimental_2018], which makes extreme outcome values more likely. This is because, unlike in stated-effort experiments, the costs of physical effort vary widely across participants with different abilities, health, curiosity or enjoyment of the activity, which can compromise inference. Based on this and previous data with the task [@loft_effectiveness_2019], we defined what counts as an outlier in the pre-registration (see \@ref(regapprov)). We considered outliers those observations of conservation effort that fell outside *Q1 - 1.5* x *IQR* and *Q3 + 1.5* x *IQR* of a treatment's distribution, *Q1(Q3)* referring to the upper limit of the first (third) quartile and *IQR* to inter-quartile range [@barbato_features_2011]. As planned, we ran all models without outlier adjustment (*including* outlier observations) and with outlier adjustment (*excluding* outlier observations). Extreme values can have multiple reasons, and it is important to look for further justifications for inlcusion or exclusion in effect estimation [@barbato_features_2011]. Table \@ref(tab:outl) provides further information on all subjects who were statistically classified as outliers: treatment assignment, effort difference from treatment median, comments taken by enumerators in the field and, as a measure of influence of the observation on regression fit, Cook's distance [@cook_detection_1977]. Cook's distance for mixed-effect models was calculated with the package *influence.ME* [@nieuwenhuis_influence.me:_2012]. Inspecting enumerators' field notes and Cook's distances with relation to the conventional cutoff for highly influential observations (Cook's distance > 4/N = `r paste("4/", nrow(df), " = ", round(4/nrow(df),3), sep = "")`;  @nieuwenhuis_influence.me:_2012) supports the choice to base major conclusions about treatment effects on results *with* outlier adjustment (results in main text). Conclusions do not qualitatively change when including all raw data (see \@ref(treateffortmod)), but note that the effect size of the unequal treatment in low-paid subjects is smaller without outlier adjustment and less precisely estimated when we control for group ID. The smaller effect size is mainly due to three strong outliers in the equal groups with low pay rate (see uppermost panel in Figure 3 in main text) who entirely stopped working for reasons that are most likely not related to treatment (see Table \@ref(tab:outl)).
+
+```{r outl}
+#prepare model and calculations for Cook's distance
+mod <- lmer(bags ~ grouptype * payrate + (1|village_ID),
+        data = df,
+        na.action = na.omit)
+
+infl <- influence(mod, obs = TRUE)
+
+#prepare variables for deviation from treatment median
+medians <- df %>%
+  group_by(treatment) %>%
+  summarise(median = median(bags))
+
+df$treatment_median <- rep(NA, nrow(df))
+for(i in seq(1:nrow(df))){
+  df$treatment_median[i] = pull(medians[medians$treatment==df$treatment[i],2])
+}
+
+#create and print table with outliers
+df %>%
+  mutate(cooks_d_cutoff = paste(round(cooks.distance(infl),3), ifelse(cooks.distance(infl) > 4/nrow(df),
+                                                                      paste(" (> ", round(4/nrow(df),3), ")", sep=""),
+                                                                      paste(" (<= ", round(4/nrow(df),3), ")", sep=""))),
+         median_dev = bags - treatment_median) %>%
+  filter(df$ID %in% c(outliers1,outliers2,outliers3,outliers4)) %>%
+  select(ID, treatment, median_dev, cooks_d_cutoff, comm_subj) %>%
+  kable(booktab = T, linesep = "", align = "l",
+        caption = "Description of outlier observations of conservation effort (No. of bags).",
+        col.names = c("ID",
+                      "Treatment",
+                      "Diff. from median",
+                      "Cook's dist.",
+                      "Comments on participant by enumerators")) %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left")
+```
+
+\newpage
+
+# Supplementary Results {#results}
+
+## Treatment effects on effort {#treateffort}
+
+### Summary of effort by treatment {#treateffortsum}
+
+
+```{r}
+#summary of conservation effort by treatment without outlier adjustment
+sum_outcome <- df %>%
+  group_by(treatment) %>%
+  summarize(Mean = mean(bags),
+            SD   = sd(bags),
+            Median = median(bags),
+            Q1 = quantile(bags, 0.25),
+            Q3 = quantile(bags, 0.75),
+            Min = min(bags),
+            Max = max(bags),
+            N = length(bags)) %>%
+  rbind(c("Unequal (aggregated)",
+          mean(df$bags[df$grouptype=="inequal"]),
+          sd(df$bags[df$grouptype=="inequal"]),
+          median(df$bags[df$grouptype=="inequal"]),
+          quantile(df$bags[df$grouptype=="inequal"], 0.25),
+          quantile(df$bags[df$grouptype=="inequal"], 0.75),
+          min(df$bags[df$grouptype=="inequal"]),
+          max(df$bags[df$grouptype=="inequal"]),
+          length(df$bags[df$grouptype=="inequal"]))) %>%
+  rbind(c("Equal (aggregated)",
+          mean(df$bags[df$grouptype=="equal"]),
+          sd(df$bags[df$grouptype=="equal"]),
+          median(df$bags[df$grouptype=="equal"]),
+          quantile(df$bags[df$grouptype=="equal"], 0.25),
+          quantile(df$bags[df$grouptype=="equal"], 0.75),
+          min(df$bags[df$grouptype=="equal"]),
+          max(df$bags[df$grouptype=="equal"]),
+          length(df$bags[df$grouptype=="equal"]))) %>%
+  rbind(c("All",
+          mean(df$bags),
+          sd(df$bags),
+          median(df$bags),
+          quantile(df$bags, 0.25),
+          quantile(df$bags, 0.75),
+          min(df$bags),
+          max(df$bags),
+          length(df$bags))) %>%
+  mutate_at(., .funs = function(x){as.numeric(x)}, .vars = seq(2,ncol(.),1))
+
+names(sum_outcome)[1] <- "Treatment"
+sum_outcome %>% kable(booktab = T, linesep = c("", "", "", "\\addlinespace", "", "\\addlinespace"), align = "l", digits = 1,
+                      caption = paste("Summary statistics for conservation effort (No. of bags) by treatment. No outlier adjustment (N = ", nrow(df), ").", sep ="")) %>%
+  kable_styling(latex_options = c("HOLD_position"), position="left")
+
+#summary of conservation effort by treatment with outlier adjustment
+sum_outcome_r <- df_r %>%
+  group_by(treatment) %>%
+  summarize(Mean = mean(bags),
+            SD   = sd(bags),
+            Median = median(bags),
+            Q1 = quantile(bags, 0.25),
+            Q3 = quantile(bags, 0.75),
+            Min = min(bags),
+            Max = max(bags),
+            N = length(bags)) %>%
+  rbind(c("Unequal (aggregated)",
+          mean(df_r$bags[df_r$grouptype=="inequal"]),
+          sd(df_r$bags[df_r$grouptype=="inequal"]),
+          median(df_r$bags[df_r$grouptype=="inequal"]),
+          quantile(df_r$bags[df_r$grouptype=="inequal"], 0.25),
+          quantile(df_r$bags[df_r$grouptype=="inequal"], 0.75),
+          min(df_r$bags[df_r$grouptype=="inequal"]),
+          max(df_r$bags[df_r$grouptype=="inequal"]),
+          length(df_r$bags[df_r$grouptype=="inequal"]))) %>%
+  rbind(c("Equal (aggregated)",
+          mean(df_r$bags[df_r$grouptype=="equal"]),
+          sd(df_r$bags[df_r$grouptype=="equal"]),
+          median(df_r$bags[df_r$grouptype=="equal"]),
+          quantile(df_r$bags[df_r$grouptype=="equal"], 0.25),
+          quantile(df_r$bags[df_r$grouptype=="equal"], 0.75),
+          min(df_r$bags[df_r$grouptype=="equal"]),
+          max(df_r$bags[df_r$grouptype=="equal"]),
+          length(df_r$bags[df_r$grouptype=="equal"]))) %>%
+  rbind(c("All",
+          mean(df_r$bags),
+          sd(df_r$bags),
+          median(df_r$bags),
+          quantile(df_r$bags, 0.25),
+          quantile(df_r$bags, 0.75),
+          min(df_r$bags),
+          max(df_r$bags),
+          length(df_r$bags))) %>%
+  mutate_at(., .funs = function(x){as.numeric(x)}, .vars = seq(2,ncol(.),1))
+
+names(sum_outcome_r)[1] <- "Treatment"
+sum_outcome_r %>% kable(booktab = T, linesep = c("", "", "", "\\addlinespace", "", "\\addlinespace"), align = "l", digits = 1,
+                        caption = paste("Summary statistics for conservation effort (No. of bags) by treatment. With outlier adjustment (N = ", nrow(df_r), ").", sep ="")) %>%
+  kable_styling(latex_options = c("HOLD_position"), position="left")
+```
+
+### Paired treatment comparisons {#treateffortcomp}
+
+```{r}
+treat_comparisons <- combn(unique(df$treatment), 2)
+#paired treatment comparisons without outlier adjustment
+comp_noOutlierAdj <- tibble(
+  "Comparison"           = apply(treat_comparisons, 2, FUN = function(x) paste(x, collapse = " vs ")),
+  
+   "t-test"              = apply(treat_comparisons, 2, FUN = function(x) {
+     tests <- t.test(df$bags[df$treatment==x[1]], df$bags[df$treatment==x[2]])
+     paste("t = ", round(tests$statistic, 2), ", ", p4digits(tests$p.value), sep ="")}),
+
+   "Randomization test"  = apply(treat_comparisons, 2, FUN = function(x){
+     p4digits(perm_test(data = df[df$treatment %in% c(x[1],x[2]),],
+                        group = "treatment",
+                        outcome = "bags",
+                        conf = FALSE))}),
+
+   "Wilcoxon test"      = apply(treat_comparisons, 2, FUN = function(x) {
+     tests <- wilcox.test(df$bags[df$treatment==x[1]], df$bags[df$treatment==x[2]])
+     p4digits(tests$p.value)}))
+
+comp_noOutlierAdj_pooled <- tibble(
+  "Comparison"           = "Equal (aggregated) vs Unequal (aggregated)",
+  
+  "t-test"               =  paste("t = ", round(t.test(df$bags[df$grouptype=="equal"],
+                                                       df$bags[df$grouptype=="inequal"])$statistic, 2), ", ",
+                                  p4digits(t.test(df$bags[df$grouptype=="equal"],
+                                                  df$bags[df$grouptype=="inequal"])$p.value), sep =""),
+
+  "Randomization test"   =  p4digits(perm_test(data = df,
+                                               group = "grouptype",
+                                               outcome = "bags",
+                                               conf = FALSE)),
+
+   "Wilcoxon test"       = p4digits(wilcox.test(df$bags[df$grouptype=="equal"],
+                                                df$bags[df$grouptype=="inequal"])$p.value))
+
+comp_noOutlierAdj <- rbind(comp_noOutlierAdj, comp_noOutlierAdj_pooled)
+
+#paired treatment comparisons with outlier adjustment
+comp_yesOutlierAdj <- tibble(
+  "Comparison"           = apply(treat_comparisons, 2, FUN = function(x) paste(x, collapse = " vs ")),
+  
+   "t-test"              = apply(treat_comparisons, 2, FUN = function(x) {
+     tests <- t.test(df_r$bags[df_r$treatment==x[1]], df_r$bags[df_r$treatment==x[2]])
+     paste("t = ", round(tests$statistic, 2), ", ", p4digits(tests$p.value), sep ="")}),
+
+   "Randomization test"  = apply(treat_comparisons, 2, FUN = function(x){
+     p4digits(perm_test(data = df_r[df_r$treatment %in% c(x[1],x[2]),],
+                        group = "treatment",
+                        outcome = "bags",
+                        conf = FALSE))}),
+
+   "Wilcoxon test"      = apply(treat_comparisons, 2, FUN = function(x) {
+     tests <- wilcox.test(df_r$bags[df_r$treatment==x[1]], df_r$bags[df_r$treatment==x[2]])
+     p4digits(tests$p.value)}))
+
+comp_yesOutlierAdj_pooled <- tibble(
+  "Comparison"           = "Equal (aggregated) vs Unequal (aggregated)",
+  
+  "t-test"               =  paste("t = ", round(t.test(df_r$bags[df_r$grouptype=="equal"],
+                                                       df_r$bags[df_r$grouptype=="inequal"])$statistic, 2), ", ",
+                                  p4digits(t.test(df_r$bags[df_r$grouptype=="equal"],
+                                                  df_r$bags[df_r$grouptype=="inequal"])$p.value), sep =""),
+
+  "Randomization test"   =  p4digits(perm_test(data = df_r,
+                                               group = "grouptype",
+                                               outcome = "bags",
+                                               conf = FALSE)),
+
+   "Wilcoxon test"       = p4digits(wilcox.test(df_r$bags[df_r$grouptype=="equal"],
+                                                df_r$bags[df_r$grouptype=="inequal"])$p.value))
+
+comp_yesOutlierAdj <- rbind(comp_yesOutlierAdj, comp_yesOutlierAdj_pooled)
+
+#print first table
+comp_noOutlierAdj %>% kable(booktab = TRUE,
+                            linesep = c(rep("",5), "\\addlinespace"),
+                            align = "l",
+                            digits = 4,
+                            caption = paste("Results from Welch's t-tests, randomization tests (5,000 permutations), and Wilcoxon rank sum tests for all treatment comparisons. No outlier adjustment (N = ", nrow(df), ").", sep ="")) %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left")
+
+#print second table
+comp_yesOutlierAdj %>% kable(booktab = TRUE,
+                            linesep = c(rep("",5), "\\addlinespace"),
+                            align = "l",
+                            digits = 4,
+                            caption = paste("Results from Welch's t-tests, randomization tests (5,000 permutations), and Wilcoxon rank sum tests for all treatment comparisons. With outlier adjustment (N = ", nrow(df_r), ").", sep ="")) %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left")
+```
+
+### Full modelling results and alternative specifications {#treateffortmod}
+
+Full regression results are reported for the data without outlier adjustment (Table \@ref(tab:noadj)), with outlier adjustment (Table \@ref(tab:adj), as in main text), and also with outlier adjustment plus an additional random effect for group ID (Table \@ref(tab:group)) and with clustered standard errors (using the *plm* package [@croissant_panel_2008]) on the group level (Table \@ref(tab:cluster)). This is because in each village there are two groups with identical (unequal) treatment assignment. For details on outlier definition and handling, see \@ref(outlier). In addition to models with the set of predictors as shown in the main text (Models 1, 3, 4, 6 and 8 in Tables \@ref(tab:noadj) to \@ref(tab:cluster)), specifications with a smaller set of socio-demographic controls only are shown (Models 2 and 5 in Tables \@ref(tab:noadj) to \@ref(tab:cluster)), as well as specifications which estimate the aggregate effect of the unequal treatment across different pay rates (i.e., ignoring the distinction between advantageous and disadvantageous inequality; Model 7 in Tables \@ref(tab:noadj) to \@ref(tab:cluster)). For a statistical overview of control variables see \@ref(sumstat).
+
+```{r noadj}
+#Model table: no outlier adj
+variablenames<-c("Unequal",
+                 "Female",
+                 "Age",
+                 "Wealth",
+                 "Education",
+                 "Children",
+                 "Income",
+                 "Forest concern",
+                 "Training run",
+                 "Prior experience task",
+                 "Likeability of snacks",
+                 "High pay rate",
+                 "Unequal x high pay rate")
+
+m1_low <- df %>%
+  filter(payrate == "400") %>%
+  lmer(bags ~ grouptype + (1|village_ID),
+       data = .,
+       na.action = na.omit)
+
+m2_low <- df %>%
+  filter(payrate == "400") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"))),
+       data = .,
+       na.action = na.omit)
+
+m3_low <- df %>%
+  filter(payrate == "400") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability")),
+       data = .,
+       na.action = na.omit)
+
+m4_high <- df %>%
+  filter(payrate == "600") %>%
+  lmer(bags ~ grouptype + (1|village_ID),
+       data = .,
+       na.action = na.omit)
+
+m5_high <- df %>%
+  filter(payrate == "600") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"))),
+       data = .,
+       na.action = na.omit)
+
+m6_high <- df %>%
+  filter(payrate == "600") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability")),
+       data = .,
+       na.action = na.omit)
+
+m7_all <- df %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability + payrate")),
+       data = .,
+       na.action = na.omit)
+
+m8_all <- df %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability + grouptype*payrate")),
+       data = .,
+       na.action = na.omit)
+
+class(m1_low)  <- "lmerMod"
+class(m2_low)  <- "lmerMod"
+class(m3_low)  <- "lmerMod"
+class(m4_high) <- "lmerMod"
+class(m5_high) <- "lmerMod"
+class(m6_high) <- "lmerMod"
+class(m7_all)  <- "lmerMod"
+class(m8_all)  <- "lmerMod"
+
+mar.rsq_low <- round(sapply(list(m1_low,m2_low,m3_low,m4_high,m5_high,m6_high,m7_all,m8_all), FUN = r.squaredGLMM)[1,],2)
+con.rsq_low <- round(sapply(list(m1_low,m2_low,m3_low,m4_high,m5_high,m6_high,m7_all,m8_all), FUN = r.squaredGLMM)[2,],2)
+
+class(m1_low)  <- "merModLmerTest"
+class(m2_low)  <- "merModLmerTest"
+class(m3_low)  <- "merModLmerTest"
+class(m4_high) <- "merModLmerTest"
+class(m5_high) <- "merModLmerTest"
+class(m6_high) <- "merModLmerTest"
+class(m7_all)  <- "merModLmerTest"
+class(m8_all)  <- "merModLmerTest"
+m1_low_std  <- as.data.frame(stdCoef.merMod(m1_low))
+m2_low_std  <- as.data.frame(stdCoef.merMod(m2_low))
+m3_low_std  <- as.data.frame(stdCoef.merMod(m3_low))
+m4_high_std <- as.data.frame(stdCoef.merMod(m4_high))
+m5_high_std <- as.data.frame(stdCoef.merMod(m5_high))
+m6_high_std <- as.data.frame(stdCoef.merMod(m6_high))
+m7_all_std  <- as.data.frame(stdCoef.merMod(m7_all))
+m8_all_std  <- as.data.frame(stdCoef.merMod(m8_all))
+
+models_noadj <- tibble(
+  "Variable"    = variablenames,
+  "Model 1"     =  c(paste(round(m1_low_std[-1,1],3), " (", round(m1_low_std[-1,2],3), ")",
+                           aster(summary(m1_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m1_low_std[-1,]))),
+  "Model 2"     =  c(paste(round(m2_low_std[-1,1],3), " (", round(m2_low_std[-1,2],3), ")",
+                           aster(summary(m2_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m2_low_std[-1,]))),
+  "Model 3"     =  c(paste(round(m3_low_std[-1,1],3), " (", round(m3_low_std[-1,2],3), ")",
+                           aster(summary(m3_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m3_low_std[-1,]))),
+  "Model 4"     =  c(paste(round(m4_high_std[-1,1],3), " (", round(m4_high_std[-1,2],3), ")",
+                           aster(summary(m4_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m4_high_std[-1,]))),
+  "Model 5"     =  c(paste(round(m5_high_std[-1,1],3), " (", round(m5_high_std[-1,2],3), ")",
+                           aster(summary(m5_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m5_high_std[-1,]))),
+  "Model 6"     =  c(paste(round(m6_high_std[-1,1],3), " (", round(m6_high_std[-1,2],3), ")",
+                           aster(summary(m6_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m6_high_std[-1,]))),
+  "Model 7"     =  c(paste(round(m7_all_std[-1,1],3), " (", round(m7_all_std[-1,2],3), ")",
+                           aster(summary(m7_all)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m7_all_std[-1,]))),
+  "Model 8"     =  c(paste(round(m8_all_std[-1,1],3), " (", round(m8_all_std[-1,2],3), ")",
+                           aster(summary(m8_all)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m8_all_std[-1,])))
+)
+
+models_noadj_attr <-tibble(
+  "Variable"    = c("N", "Marginal R^2", "Conditional R^2", "Log likelihood"),
+  "Model 1"     = c(nobs(m1_low),  mar.rsq_low[1], con.rsq_low[1], round(logLik(m1_low)[1], 1)),
+  "Model 2"     = c(nobs(m2_low),  mar.rsq_low[2], con.rsq_low[2], round(logLik(m2_low)[1], 1)),
+  "Model 3"     = c(nobs(m3_low),  mar.rsq_low[3], con.rsq_low[3], round(logLik(m3_low)[1], 1)),
+  "Model 4"     = c(nobs(m4_high), mar.rsq_low[4], con.rsq_low[4], round(logLik(m4_high)[1],1)),
+  "Model 5"     = c(nobs(m5_high), mar.rsq_low[5], con.rsq_low[5], round(logLik(m5_high)[1],1)),
+  "Model 6"     = c(nobs(m6_high), mar.rsq_low[6], con.rsq_low[6], round(logLik(m6_high)[1],1)),
+  "Model 7"     = c(nobs(m7_all),  mar.rsq_low[7], con.rsq_low[7], round(logLik(m7_all)[1], 1)),
+  "Model 8"     = c(nobs(m8_all),  mar.rsq_low[8], con.rsq_low[8], round(logLik(m8_all)[1], 1))
+)
+
+models_noadj_compl <- rbind(models_noadj,models_noadj_attr)
+
+models_noadj_compl %>% kable(booktab = T,
+                             linesep = c(rep("",length(variablenames)-1), "\\addlinespace"),
+                             align = "l",
+                             caption = "Results from linear mixed-effect models with village as random effect. Dependent and independent variables (except binary variables) are standardized to have mean = 0 and standard deviation = 1. No outlier adjustment.") %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left") %>%
+  add_footnote("*p<0.1, **p<0.05, ***p<0.01", notation="none") %>%
+  add_header_above(c(" " = 1, "Low pay rate" = 3, "High pay rate" = 3, "All" = 2))
+```
+
+```{r adj}
+#Model table: outlier adj
+m1_low <- df_r %>%
+  filter(payrate == "400") %>%
+  lmer(bags ~ grouptype + (1|village_ID),
+      data = .,
+      na.action = na.omit)
+
+m2_low <- df_r %>%
+  filter(payrate == "400") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"))),
+       data = .,
+       na.action = na.omit)
+
+m3_low <- df_r %>%
+  filter(payrate == "400") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability")),
+       data = .,
+       na.action = na.omit)
+
+m4_high <- df_r %>%
+  filter(payrate == "600") %>%
+  lmer(bags ~ grouptype + (1|village_ID),
+       data = .,
+       na.action = na.omit)
+
+m5_high <- df_r %>%
+  filter(payrate == "600") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"))),
+       data = .,
+       na.action = na.omit)
+
+m6_high <- df_r %>%
+  filter(payrate == "600") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability")),
+       data = .,
+       na.action = na.omit)
+
+m7_all <- df_r %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability + payrate")),
+       data = .,
+       na.action = na.omit)
+m8_all <- df_r %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability + grouptype*payrate")),
+       data = .,
+       na.action = na.omit)
+
+class(m1_low)  <- "lmerMod"
+class(m2_low)  <- "lmerMod"
+class(m3_low)  <- "lmerMod"
+class(m4_high) <- "lmerMod"
+class(m5_high) <- "lmerMod"
+class(m6_high) <- "lmerMod"
+class(m7_all)  <- "lmerMod"
+class(m8_all)  <- "lmerMod"
+
+mar.rsq_low <- round(sapply(list(m1_low,m2_low,m3_low,m4_high,m5_high,m6_high,m7_all,m8_all), FUN = r.squaredGLMM)[1,],2)
+con.rsq_low <- round(sapply(list(m1_low,m2_low,m3_low,m4_high,m5_high,m6_high,m7_all,m8_all), FUN = r.squaredGLMM)[2,],2)
+
+class(m1_low)  <- "merModLmerTest"
+class(m2_low)  <- "merModLmerTest"
+class(m3_low)  <- "merModLmerTest"
+class(m4_high) <- "merModLmerTest"
+class(m5_high) <- "merModLmerTest"
+class(m6_high) <- "merModLmerTest"
+class(m7_all)  <- "merModLmerTest"
+class(m8_all)  <- "merModLmerTest"
+
+m1_low_std  <- as.data.frame(stdCoef.merMod(m1_low))
+m2_low_std  <- as.data.frame(stdCoef.merMod(m2_low))
+m3_low_std  <- as.data.frame(stdCoef.merMod(m3_low))
+m4_high_std <- as.data.frame(stdCoef.merMod(m4_high))
+m5_high_std <- as.data.frame(stdCoef.merMod(m5_high))
+m6_high_std <- as.data.frame(stdCoef.merMod(m6_high))
+m7_all_std  <- as.data.frame(stdCoef.merMod(m7_all))
+m8_all_std  <- as.data.frame(stdCoef.merMod(m8_all))
+
+models_adj <- tibble(
+  "Variable"    = variablenames,
+  "Model 1"     =  c(paste(round(m1_low_std[-1,1],3), " (", round(m1_low_std[-1,2],3), ")",
+                           aster(summary(m1_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m1_low_std[-1,]))),
+  "Model 2"     =  c(paste(round(m2_low_std[-1,1],3), " (", round(m2_low_std[-1,2],3), ")",
+                           aster(summary(m2_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m2_low_std[-1,]))),
+  "Model 3"     =  c(paste(round(m3_low_std[-1,1],3), " (", round(m3_low_std[-1,2],3), ")",
+                           aster(summary(m3_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m3_low_std[-1,]))),
+  "Model 4"     =  c(paste(round(m4_high_std[-1,1],3), " (", round(m4_high_std[-1,2],3), ")",
+                           aster(summary(m4_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m4_high_std[-1,]))),
+  "Model 5"     =  c(paste(round(m5_high_std[-1,1],3), " (", round(m5_high_std[-1,2],3), ")",
+                           aster(summary(m5_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m5_high_std[-1,]))),
+  "Model 6"     =  c(paste(round(m6_high_std[-1,1],3), " (", round(m6_high_std[-1,2],3), ")",
+                           aster(summary(m6_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m6_high_std[-1,]))),
+  "Model 7"     =  c(paste(round(m7_all_std[-1,1],3), " (", round(m7_all_std[-1,2],3), ")",
+                           aster(summary(m7_all)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m7_all_std[-1,]))),
+  "Model 8"     =  c(paste(round(m8_all_std[-1,1],3), " (", round(m8_all_std[-1,2],3), ")",
+                           aster(summary(m8_all)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m8_all_std[-1,])))
+  )
+
+models_adj_attr <-tibble(
+  "Variable"    = c("N", "Marginal R^2", "Conditional R^2", "Log likelihood"),
+  "Model 1"     = c(nobs(m1_low),  mar.rsq_low[1], con.rsq_low[1], round(logLik(m1_low)[1], 1)),
+  "Model 2"     = c(nobs(m2_low),  mar.rsq_low[2], con.rsq_low[2], round(logLik(m2_low)[1], 1)),
+  "Model 3"     = c(nobs(m3_low),  mar.rsq_low[3], con.rsq_low[3], round(logLik(m3_low)[1], 1)),
+  "Model 4"     = c(nobs(m4_high), mar.rsq_low[4], con.rsq_low[4], round(logLik(m4_high)[1],1)),
+  "Model 5"     = c(nobs(m5_high), mar.rsq_low[5], con.rsq_low[5], round(logLik(m5_high)[1],1)),
+  "Model 6"     = c(nobs(m6_high), mar.rsq_low[6], con.rsq_low[6], round(logLik(m6_high)[1],1)),
+  "Model 7"     = c(nobs(m7_all),  mar.rsq_low[7], con.rsq_low[7], round(logLik(m7_all)[1], 1)),
+  "Model 8"     = c(nobs(m8_all),  mar.rsq_low[8], con.rsq_low[8], round(logLik(m8_all)[1], 1))
+ )
+
+models_adj_compl <- rbind(models_adj,models_adj_attr)
+
+models_adj_compl %>% kable(booktab = T,
+                           linesep = c(rep("",length(variablenames)-1), "\\addlinespace"),
+                           align = "l",
+                           caption = "Results from linear mixed-effect models with village as random effect. Dependent and independent variables (except binary variables) are standardized to have mean = 0 and standard deviation = 1. With outlier adjustment.") %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left") %>%
+  add_footnote("*p<0.1, **p<0.05, ***p<0.01", notation="none") %>%
+  add_header_above(c(" " = 1, "Low pay rate" = 3, "High pay rate" = 3, "All" = 2))
+```
+
+```{r group}
+#Model table: group ID REs
+m1_low <- df_r %>%
+  filter(payrate == "400") %>%
+  lmer(bags ~ grouptype + (1|village_ID) + (1|uniqueGroup_ID),
+       data = .,
+       na.action = na.omit)
+
+m2_low <- df_r %>%
+  filter(payrate == "400") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)", "(1|uniqueGroup_ID)"), collapse = "+"))),
+       data = .,
+       na.action = na.omit)
+m3_low <- df_r %>%
+  filter(payrate == "400") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)", "(1|uniqueGroup_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability")),
+       data = .,
+       na.action = na.omit)
+
+m4_high <- df_r %>%
+  filter(payrate == "600") %>%
+  lmer(bags ~ grouptype + (1|village_ID) + (1|uniqueGroup_ID),
+       data = .,
+       na.action = na.omit)
+
+m5_high <- df_r %>%
+  filter(payrate == "600") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)", "(1|uniqueGroup_ID)"), collapse = "+"))),
+       data = .,
+       na.action = na.omit)
+m6_high <- df_r %>%
+  filter(payrate == "600") %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)", "(1|uniqueGroup_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability")),
+       data = .,
+       na.action = na.omit)
+
+m7_all <- df_r %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)", "(1|uniqueGroup_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability + payrate")),
+       data = .,
+       na.action = na.omit)
+
+m8_all <- df_r %>%
+  lmer(formula(paste("bags~", "grouptype +",
+                     paste(c(sociodemos, "(1|village_ID)", "(1|uniqueGroup_ID)"), collapse = "+"),
+                     "+ forest_concern + training + bagsbefore + likeability + grouptype*payrate")),
+       data = .,
+       na.action = na.omit)
+
+class(m1_low)  <- "lmerMod"
+class(m2_low)  <- "lmerMod"
+class(m3_low)  <- "lmerMod"
+class(m4_high) <- "lmerMod"
+class(m5_high) <- "lmerMod"
+class(m6_high) <- "lmerMod"
+class(m7_all)  <- "lmerMod"
+class(m8_all)  <- "lmerMod"
+
+mar.rsq_low    <- round(sapply(list(m1_low,m2_low,m3_low,m4_high,m5_high,m6_high,m7_all,m8_all), FUN = r.squaredGLMM)[1,],2)
+con.rsq_low    <- round(sapply(list(m1_low,m2_low,m3_low,m4_high,m5_high,m6_high,m7_all,m8_all), FUN = r.squaredGLMM)[2,],2)
+
+class(m1_low)  <- "merModLmerTest"
+class(m2_low)  <- "merModLmerTest"
+class(m3_low)  <- "merModLmerTest"
+class(m4_high) <- "merModLmerTest"
+class(m5_high) <- "merModLmerTest"
+class(m6_high) <- "merModLmerTest"
+class(m7_all)  <- "merModLmerTest"
+class(m8_all)  <- "merModLmerTest"
+
+m1_low_std  <- as.data.frame(stdCoef.merMod(m1_low))
+m2_low_std  <- as.data.frame(stdCoef.merMod(m2_low))
+m3_low_std  <- as.data.frame(stdCoef.merMod(m3_low))
+m4_high_std <- as.data.frame(stdCoef.merMod(m4_high))
+m5_high_std <- as.data.frame(stdCoef.merMod(m5_high))
+m6_high_std <- as.data.frame(stdCoef.merMod(m6_high))
+m7_all_std  <- as.data.frame(stdCoef.merMod(m7_all))
+m8_all_std  <- as.data.frame(stdCoef.merMod(m8_all))
+
+models_adj <- tibble(
+  "Variable"    = variablenames,
+  "Model 1"     =  c(paste(round(m1_low_std[-1,1],3), " (", round(m1_low_std[-1,2],3), ")",
+                           aster(summary(m1_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m1_low_std[-1,]))),
+  "Model 2"     =  c(paste(round(m2_low_std[-1,1],3), " (", round(m2_low_std[-1,2],3), ")",
+                           aster(summary(m2_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m2_low_std[-1,]))),
+  "Model 3"     =  c(paste(round(m3_low_std[-1,1],3), " (", round(m3_low_std[-1,2],3), ")",
+                           aster(summary(m3_low)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m3_low_std[-1,]))),
+  "Model 4"     =  c(paste(round(m4_high_std[-1,1],3), " (", round(m4_high_std[-1,2],3), ")",
+                           aster(summary(m4_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m4_high_std[-1,]))),
+  "Model 5"     =  c(paste(round(m5_high_std[-1,1],3), " (", round(m5_high_std[-1,2],3), ")",
+                           aster(summary(m5_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m5_high_std[-1,]))),
+  "Model 6"     =  c(paste(round(m6_high_std[-1,1],3), " (", round(m6_high_std[-1,2],3), ")",
+                           aster(summary(m6_high)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m6_high_std[-1,]))),
+  "Model 7"     =  c(paste(round(m7_all_std[-1,1],3), " (", round(m7_all_std[-1,2],3), ")",
+                           aster(summary(m7_all)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m7_all_std[-1,]))),
+  "Model 8"     =  c(paste(round(m8_all_std[-1,1],3), " (", round(m8_all_std[-1,2],3), ")",
+                           aster(summary(m8_all)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m8_all_std[-1,])))
+  )
+
+models_adj_attr <-tibble(
+  "Variable"    = c("N", "Marginal R^2", "Conditional R^2", "Log likelihood"),
+  "Model 1"     = c(nobs(m1_low),  mar.rsq_low[1], con.rsq_low[1], round(logLik(m1_low)[1], 1)),
+  "Model 2"     = c(nobs(m2_low),  mar.rsq_low[2], con.rsq_low[2], round(logLik(m2_low)[1], 1)),
+  "Model 3"     = c(nobs(m3_low),  mar.rsq_low[3], con.rsq_low[3], round(logLik(m3_low)[1], 1)),
+  "Model 4"     = c(nobs(m4_high), mar.rsq_low[4], con.rsq_low[4], round(logLik(m4_high)[1],1)),
+  "Model 5"     = c(nobs(m5_high), mar.rsq_low[5], con.rsq_low[5], round(logLik(m5_high)[1],1)),
+  "Model 6"     = c(nobs(m6_high), mar.rsq_low[6], con.rsq_low[6], round(logLik(m6_high)[1],1)),
+  "Model 7"     = c(nobs(m7_all),  mar.rsq_low[7], con.rsq_low[7], round(logLik(m7_all)[1], 1)),
+  "Model 8"     = c(nobs(m8_all),  mar.rsq_low[8], con.rsq_low[8], round(logLik(m8_all)[1], 1))
+  )
+
+models_adj_compl <- rbind(models_adj,models_adj_attr)
+
+models_adj_compl %>% kable(booktab = T,
+                           linesep = c(rep("",length(variablenames)-1), "\\addlinespace"),
+                           align = "l",
+                           caption = "Results from linear mixed-effect models with village and group ID as random effects. Dependent and independent variables (except binary variables) are standardized to have mean = 0 and standard deviation = 1. With outlier adjustment.") %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left") %>%
+  add_footnote("*p<0.1, **p<0.05, ***p<0.01", notation="none") %>%
+  add_header_above(c(" " = 1, "Low pay rate" = 3, "High pay rate" = 3, "All" = 2))
+```
+
+
+```{r cluster}
+#Model table: clustered SEs
+df_r_400 <- df_r[df_r$payrate == "400",]
+df_r_600 <- df_r[df_r$payrate == "600",]
+
+m1_low <- plm(bags ~ grouptype,
+           data   = df_r_400,
+           index  = c("uniqueGroup_ID"),
+           effect = "individual",
+           model  = "random",
+           random.method = "walhus")
+coefstest1 <- coeftest(m1_low, vcov=vcovHC(m1_low,type="HC0",cluster="group")) #p = 0.0264
+
+m2_low <- plm(formula(paste("bags~", "grouptype +",paste(c(sociodemos), collapse = "+"))),
+              data   = df_r_400,
+              index  = c("uniqueGroup_ID"),
+              effect = "individual",
+              model  = "random",
+              random.method = "walhus")
+coefstest2 <- coeftest(m2_low, vcov=vcovHC(m2_low,type="HC0",cluster="group")) #p = 0.0258
+
+m3_low <- plm(formula(paste("bags~", "grouptype +",
+                            paste(c(sociodemos), collapse = "+"),
+                            "+ forest_concern + training + bagsbefore + likeability")),
+              data   = df_r_400,
+              index  = c("uniqueGroup_ID"),
+              effect = "individual",
+              model  = "random",
+              random.method = "walhus")
+coefstest3 <- coeftest(m3_low, vcov=vcovHC(m3_low,type="HC0",cluster="group")) #p = 0.015
+
+m4_high <- plm(bags ~ grouptype,
+              data   = df_r_600,
+              index  = c("uniqueGroup_ID"),
+              effect = "individual",
+              model  = "random",
+              random.method = "walhus")
+coefstest4 <- coeftest(m4_high, vcov=vcovHC(m4_high,type="HC0",cluster="group")) #p = 0.74
+
+m5_high <- plm(formula(paste("bags~", "grouptype +",paste(c(sociodemos), collapse = "+"))),
+              data   = df_r_600,
+              index  = c("uniqueGroup_ID"),
+              effect = "individual",
+              model  = "random",
+              random.method = "walhus")
+coefstest5 <- coeftest(m5_high, vcov=vcovHC(m5_high,type="HC0",cluster="group")) #p = 0.84
+
+m6_high <- plm(formula(paste("bags~", "grouptype +",
+                            paste(c(sociodemos), collapse = "+"),
+                            "+ forest_concern + training + bagsbefore + likeability")),
+              data   = df_r_600,
+              index  = c("uniqueGroup_ID"),
+              effect = "individual",
+              model  = "random",
+              random.method = "walhus")
+coefstest6 <- coeftest(m6_high, vcov=vcovHC(m6_high,type="HC0",cluster="group"))
+
+m7_all <- plm(formula(paste("bags~", "grouptype +",
+                             paste(c(sociodemos), collapse = "+"),
+                             "+ forest_concern + training + bagsbefore + likeability + payrate")),
+               data   = df_r,
+               index  = c("uniqueGroup_ID"),
+               effect = "individual",
+               model  = "random",
+               random.method = "walhus")
+coefstest7 <- coeftest(m7_all, vcov=vcovHC(m7_all,type="HC0",cluster="group"))
+
+m8_all <- plm(formula(paste("bags~", "grouptype +",
+                             paste(c(sociodemos), collapse = "+"),
+                             "+ forest_concern + training + bagsbefore + likeability + grouptype*payrate")),
+               data   = df_r,
+               index  = c("uniqueGroup_ID"),
+               effect = "individual",
+               model  = "random",
+               random.method = "walhus")
+coefstest8 <- coeftest(m8_all, vcov=vcovHC(m8_all,type="HC0",cluster="group"))
+
+variablenames_wI<-c("Intercept",
+                    "Unequal",
+                    "Female",
+                    "Age",
+                    "Wealth",
+                    "Education",
+                    "Children",
+                    "Income",
+                    "Forest concern",
+                    "Training run",
+                    "Prior experience task",
+                    "Likeability of snacks",
+                    "High pay rate",
+                    "Unequal x high pay rate")
+
+models_adj <- tibble(
+  "Variable"    =  variablenames_wI,
+  "Model 1"     =  c(paste(round(as.numeric(coefstest1[,1]),3), " (", round(as.numeric(coefstest1[,2]),3), ")",
+                           aster(round(as.numeric(coefstest1[,4]),3)),sep=""),
+                     rep("", length(variablenames_wI)-nrow(coefstest1))),
+  "Model 2"     =  c(paste(round(as.numeric(coefstest2[,1]),3), " (", round(as.numeric(coefstest2[,2]),3), ")",
+                           aster(round(as.numeric(coefstest2[,4]),3)),sep=""),
+                     rep("", length(variablenames_wI)-nrow(coefstest2))),
+  "Model 3"     =  c(paste(round(as.numeric(coefstest3[,1]),3), " (", round(as.numeric(coefstest3[,2]),3), ")",
+                           aster(round(as.numeric(coefstest3[,4]),3)),sep=""),
+                     rep("", length(variablenames_wI)-nrow(coefstest3))),
+  "Model 4"     =  c(paste(round(as.numeric(coefstest4[,1]),3), " (", round(as.numeric(coefstest4[,2]),3), ")",
+                           aster(round(as.numeric(coefstest4[,4]),3)),sep=""),
+                     rep("", length(variablenames_wI)-nrow(coefstest4))),
+  "Model 5"     =  c(paste(round(as.numeric(coefstest5[,1]),3), " (", round(as.numeric(coefstest5[,2]),3), ")",
+                           aster(round(as.numeric(coefstest5[,4]),3)),sep=""),
+                     rep("", length(variablenames_wI)-nrow(coefstest5))),
+  "Model 6"     =  c(paste(round(as.numeric(coefstest6[,1]),3), " (", round(as.numeric(coefstest6[,2]),3), ")",
+                           aster(round(as.numeric(coefstest6[,4]),3)),sep=""),
+                     rep("", length(variablenames_wI)-nrow(coefstest6))),
+  "Model 7"     =  c(paste(round(as.numeric(coefstest7[,1]),3), " (", round(as.numeric(coefstest7[,2]),3), ")",
+                           aster(round(as.numeric(coefstest7[,4]),3)),sep=""),
+                     rep("", length(variablenames_wI)-nrow(coefstest7))),
+  "Model 8"     =  c(paste(round(as.numeric(coefstest8[,1]),3), " (", round(as.numeric(coefstest8[,2]),3), ")",
+                           aster(round(as.numeric(coefstest8[,4]),3)),sep=""),
+                     rep("", length(variablenames_wI)-nrow(coefstest8)))
+  )
+
+models_adj_attr <- tibble(
+  "Variable"    = "N",
+  "Model 1"     = nobs(m1_low) ,
+  "Model 2"     = nobs(m2_low) ,
+  "Model 3"     = nobs(m3_low) ,
+  "Model 4"     = nobs(m4_high),
+  "Model 5"     = nobs(m5_high),
+  "Model 6"     = nobs(m6_high),
+  "Model 7"     = nobs(m7_all),
+  "Model 8"     = nobs(m8_all))
+
+models_adj_compl <- rbind(models_adj,models_adj_attr)
+
+models_adj_compl %>% kable(booktab = T,
+                           linesep = c(rep("",length(variablenames_wI)-1), "\\addlinespace"),
+                           align = "l",
+                           caption = "Results from linear mixed-effect models with group ID as random effect and standard errors clustered at the group level. Variables are not standardized. With outlier adjustment.") %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left") %>%
+  add_footnote("*p<0.1, **p<0.05, ***p<0.01", notation="none") %>%
+  add_header_above(c(" " = 1, "Low pay rate" = 3, "High pay rate" = 3, "All" = 2))
+```
+
+### Interactions and mediation on the individual level {#treateffortmedi}
+
+We explored whether the effect of being assigned to a group with unequal distribution was different for participants with different gender (Table \@ref(tab:gend)), because gender was a strong predictor of effort (see \@ref(treateffortmod)), or with different score for endorsement of the accountability principle (Table \@ref(tab:acc)), because individual fairness principles might play a role in how the unequal treatment affects conservation effort. We found no evidence of such interaction effects, neither among participants with low, nor among participants with high pay rate.
+
+We also explored whether the individual fairness judgment about one's own payment rate mediated the negative effect of the unequal condition which we found for low-paid participants (see \@ref(treateffortmod)). It is plausible that the effect of disadvantaged inequality on conservation effort runs through its effect on perceived fairness. To assess this, we ran a causal mediation analysis using natural effect models following @lange_simple_2012 with the R package *medflex* @steen_medflex:_2017. For the imputation model that creates synthetic counterfactual observations, all control variables used before (see \@ref(treateffortmod)) were included to as best as possible control for confounding of the relationship between mediator (fairness judgment) and outcome (conservation effort). We found no evidenve for an indirect causal effect on conservation effort via an individual's fairness judgment. The natural indirect effect is small and non-significant and the mediated proportion of the total effect is close to zero (Table \@ref(tab:medi)).
+
+Note that our study was neither powered, nor designed to detect the interaction or mediation effects that were analyzed in this section. Precision of all obtained estimates is low.
+
+```{r gend}
+#Model table: gender interaction effect
+m1_gen <- df_r %>%
+  filter(payrate == "400") %>%
+  lmer(bags ~ grouptype * gender + (1|village_ID),
+       data = .,
+       na.action = na.omit)
+
+m2_gen <- df_r %>%
+  filter(payrate == "600") %>%
+  lmer(bags ~ grouptype * gender + (1|village_ID),
+       data = .,
+       na.action = na.omit)
+
+class(m1_gen) <- "lmerMod"
+class(m2_gen) <- "lmerMod"
+
+mar.rsq_gen   <- round(sapply(list(m1_gen,m2_gen), FUN = r.squaredGLMM)[1,],2)
+con.rsq_gen   <- round(sapply(list(m1_gen,m2_gen), FUN = r.squaredGLMM)[2,],2)
+
+class(m1_gen) <- "merModLmerTest"
+class(m2_gen) <- "merModLmerTest"
+
+m1_gen_std    <- as.data.frame(stdCoef.merMod(m1_gen))
+m2_gen_std    <- as.data.frame(stdCoef.merMod(m2_gen))
+
+variablenames<- c("Unequal", "Female", "Unequal x female")
+
+models_gen <- tibble(
+  "Variable"    = variablenames,
+  "Model 1"     =  c(paste(round(m1_gen_std[-1,1],3), " (", round(m1_gen_std[-1,2],3), ")",
+                           aster(summary(m1_gen)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m1_gen_std[-1,]))),
+  "Model 2"     =  c(paste(round(m2_gen_std[-1,1],3), " (", round(m2_gen_std[-1,2],3), ")",
+                           aster(summary(m2_gen)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m2_gen_std[-1,]))))
+
+models_gen_attr <-tibble(
+  "Variable"    = c("N", "Marginal R^2", "Conditional R^2", "Log likelihood"),
+  "Model 1"     = c(nobs(m1_gen) , mar.rsq_gen[1], con.rsq_gen[1], round(logLik(m1_gen)[1],1)),
+  "Model 2"     = c(nobs(m2_gen) , mar.rsq_gen[2], con.rsq_gen[2], round(logLik(m2_gen)[1],1)))
+
+models_gen_compl <- rbind(models_gen,models_gen_attr)
+
+models_gen_compl %>% kable(booktab = T,
+                           linesep = c(rep("",length(variablenames)-1), "\\addlinespace"),
+                           align = "l",
+                           caption = "Results from linear mixed-effect models with village as random effect on interaction between unequal treatment and gender. The dependent variable is standardized to have mean = 0 and standard deviation = 1. With outlier adjustment.") %>%
+  kable_styling(latex_options = c("HOLD_position"), position="left") %>%
+  add_footnote("*p<0.1, **p<0.05, ***p<0.01", notation="none") %>%
+  add_header_above(c(" " = 1, "Low pay rate" = 1, "High pay rate" = 1))
+```
+
+```{r acc}
+#Model table: endorsement of accountability interaction effect
+m1_acc <- df_r %>%
+  filter(payrate == "400") %>%
+  lmer(bags ~ grouptype * accountab + (1|village_ID),
+       data = .,
+       na.action = na.omit)
+
+m2_acc <- df_r %>%
+  filter(payrate == "600") %>%
+  lmer(bags ~ grouptype * accountab + (1|village_ID),
+       data = .,
+       na.action = na.omit)
+
+class(m1_acc) <- "lmerMod"
+class(m2_acc) <- "lmerMod"
+
+mar.rsq_acc   <- round(sapply(list(m1_acc,m2_acc), FUN = r.squaredGLMM)[1,],2)
+con.rsq_acc   <- round(sapply(list(m1_acc,m2_acc), FUN = r.squaredGLMM)[2,],2)
+
+class(m1_acc) <- "merModLmerTest"
+class(m2_acc) <- "merModLmerTest"
+
+m1_acc_std    <- as.data.frame(stdCoef.merMod(m1_acc))
+m2_acc_std    <- as.data.frame(stdCoef.merMod(m2_acc))
+
+variablenames<- c("Unequal", "Endorsement accountability principle", "Unequal x endorsement accountability principle")
+
+models_acc <- tibble(
+  "Variable"    = variablenames,
+  "Model 1"     =  c(paste(round(m1_acc_std[-1,1],3), " (", round(m1_acc_std[-1,2],3), ")",
+                           aster(summary(m1_acc)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                     rep("", length(variablenames)-nrow(m1_acc_std[-1,]))),
+  "Model 2"     =  c(paste(round(m2_acc_std[-1,1],3), " (", round(m2_acc_std[-1,2],3), ")",
+                            aster(summary(m2_acc)$coefficients[-1,"Pr(>|t|)"]),sep=""),
+                      rep("", length(variablenames)-nrow(m2_acc_std[-1,]))))
+
+models_acc_attr <-tibble(
+  "Variable"    = c("N", "Marginal R^2", "Conditional R^2", "Log likelihood"),
+  "Model 1"     = c(nobs(m1_acc) , mar.rsq_acc[1], con.rsq_acc[1], round(logLik(m1_acc)[1],1)),
+  "Model 2"     = c(nobs(m2_acc) , mar.rsq_acc[2], con.rsq_acc[2], round(logLik(m2_acc)[1],1)))
+
+models_acc_compl <- rbind(models_acc,models_acc_attr)
+
+models_acc_compl %>% kable(booktab = T,
+                           linesep = c(rep("",length(variablenames)-1), "\\addlinespace"),
+                           align = "l",
+                           caption = "Results from linear mixed-effect models with village as random effect on interaction between unequal treatment and endorsement of the accountability principle. The dependent variable is standardized to have mean = 0 and standard deviation = 1. With outlier adjustment.") %>%
+  kable_styling(latex_options = c("HOLD_position"), position="left") %>%
+  add_footnote("*p<0.1, **p<0.05, ***p<0.01", notation="none") %>%
+  add_header_above(c(" " = 1, "Low pay rate" = 1, "High pay rate" = 1))
+```
+
+
+```{r medi}
+#get p-value
+#reduce to low subdataset
+df_r_low <- df_r[df_r$payrate == "400",]
+
+#adjust classes
+df_r_low$grouptype<-as.factor(df_r_low$grouptype)
+df_r_low$village_ID<-as.factor(df_r_low$village_ID)
+
+#fit imputation via auxiliary model, using all covariates to assume conditional independence of mediator and outcome
+fitAux <- df_r_low %>%
+  drop_na(c("fair", sociodemos, "forest_concern", "training", "bagsbefore", "likeability")) %>% 
+  glm(formula(paste("bags~", "grouptype + fair + village_ID + ",
+                    paste(c(sociodemos), collapse = "+"),
+                    "+ forest_concern + training + bagsbefore + likeability")),
+      data = .,
+      na.action = na.exclude)
+
+#create duplicated, imputed dataset
+dupData <- neImpute(fitAux, nMed = 1)
+
+#fit natural effects model with imputed dataset
+fitNEM <- neModel(bags ~ grouptype0 + grouptype1 + village_ID,
+                  expData = dupData,
+                  family = gaussian, se = "robust", na.action = na.exclude)
+
+#create results table
+NEMres <- as_tibble(cbind(
+  Effect = c("Natural direct effect", "Natural indirect effect", "Total effect"),
+  round(summary(neEffdecomp(fitNEM))$coefficients[,-3],3)))
+
+NEMattr <- tibble(
+  Effect = "Mediated proportion (95%-CI)",
+  Estimate = paste(round(getMedProp(fitNEM)[1],2), " (",
+                    round(getMedProp(fitNEM)[2],2), ", ",
+                    round(getMedProp(fitNEM)[3],2), ")", sep=""),
+  "Std. Error" = "",
+  "Pr(>|z|)" = ""
+  )
+
+NEMcomp <-rbind(NEMres, NEMattr)
+
+NEMcomp %>% kable(booktab = T,
+                  linesep = c(rep("",2), "\\addlinespace"),
+                  align = "l",
+                  caption = "Results from mediation analysis with natural effect models based on data from participants with low pay rate only. Unequal distribution is exposure variable, fairness judgment is mediator and conservation effort is outcome (unstandardized). Effect decomposition into a direct and an indirect effect (via the mediator) of exposure on outcome is shown with standard errors based on the sandwich estimator. The model includes village as a control variable. With outlier adjustment.") %>%
+  kable_styling(latex_options = c("HOLD_position"), position="left")
+```
+
+### Between-village variation {#villeffort}
+
+```{r fig.asp = 1.15, fig.cap = "Results for all 14 experimental sites separately (village name with commune name in parentheses). Dashed horizontal lines indicate village-level median effort.", out.extra = ""}
+
+bags_median <- df %>%
+  group_by(village_commune) %>%
+  summarise(med = median(bags))
+
+effort_villages <- df %>%
+  ggplot(aes(y = bags, x = treatment, fill = treatment)) +
+  geom_boxplot() +
+  geom_hline(data = bags_median, aes(yintercept = med), linetype = 2, size = 0.6) +
+  facet_wrap(~village_commune, ncol = 4) +
+  labs(x = "", y = "Conservation effort (No. of bags)", fill = "Treatment") +
+  theme_bw() +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        strip.text = element_text(size = 7),
+        legend.justification=c(1,0),
+        legend.position=c(1,0)) +
+  scale_fill_manual(values = c("#decbe4", "#ccebc5", "#b3cde3", "#fbb4ae"))
+
+effort_villages
+
+```
+
+## Conservation effort and real-world forest protection behavior {#protecteffort}
+
+We compare conservation behavior in the real-effort experiment with real-world conservation behavior as self-reported in the survey (see \@ref(surv)). Forest protection activities like patrolling, monitoring or firefighting, which we elicited here, are explicitly part of the Vietnamese PFES program in which villages are enrolled [@loft_effectiveness_2019], but participation on the household or individual level is de facto not enforced (`r round(prop.table(table(df$protect))["yes"]*100,0)`% responded being active in forest protection). When running mixed-effect models on the full dataset to predict effort in the training run and effort in the incentivized experiment with forest protection behavior as an independent variable (adjusting for treatment and the standard set of control variables as shown in \@ref(treateffortmod), except the training run), there is some evidence for a correspondence between real-world and real-effort task behavior (p-values from mixed-effect models are shown in box plots, p-values from simple t-tests for the training and the experimental data are `r round(t.test(df$training ~ df$protect)$p.value,3)` and `r round(t.test(df$bags_demean ~ df$protect)$p.value,3)`, respectively).
+
+```{r fig.height = 5, fig.width = 8.5, fig.cap = "Box plots show conservation effort in the real-effort task during the training run (left) and during the incentivized experiment (right; to account for treatment effects, the plot shows observations with subtracted treatment means) for participants who report being active in forest conservation vs those who report not being active. The p-values are based on mixed-effect models.", out.extra = ""}
+
+#allow double plot
+par(mar=c(6.5,5.5,2,1.1),cex.lab=1.1,
+    cex.axis=1,
+    mfrow=c(1,2))
+
+#Plotting forest protection behavior vs training performance
+boxplot(df$training~df$protect,
+     ylim =c(0,18),
+     main = "Training run (5 minutes)",
+     ylab = "Conservation effort (No. of bags)",
+     xlab = "")
+
+title(xlab = substitute(paste(italic("Do you take part in patrolling, monitoring,
+    firefighting or any other activities for
+           the protection of the forest?"))),
+      line = 5)
+
+effort_protect_train <- df %>%
+  lmer(formula(paste("training ~", "grouptype + protect +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + bagsbefore + likeability + grouptype*payrate")),
+       data = .,
+       na.action = na.omit)
+
+#get p-value
+pvalue <- format(round(coef(summary(effort_protect_train))["protectyes","Pr(>|t|)"],3), nsmall=3)
+#print legend
+legend("top", paste0("p = ", pvalue), bty= "n", cex = 1.1)
+
+#Plotting forest protection behavior vs incentivized task performance
+boxplot(df$bags_demean~df$protect,
+        main = "Incentivized experiment (60 minutes)",
+        ylab = "",
+        xlab = "")
+
+title(ylab = "Conservation effort (No. of bags)\n(demeaned for treatment)",
+ line = 2.7)
+
+title(xlab = substitute(paste(italic("Do you take part in\npatrolling, monitoring, firefighting\nor any other activities for the protection of the forest?"))),
+line = 5)
+
+effort_protect_exp <- df %>%
+  lmer(formula(paste("bags ~", "grouptype + protect +",
+                     paste(c(sociodemos, "(1|village_ID)"), collapse = "+"),
+                     "+ forest_concern + bagsbefore + likeability + grouptype*payrate")),
+        data = .,
+        na.action = na.omit)
+
+#get p-value
+pvalue <- format(round(coef(summary(effort_protect_exp))["protectyes","Pr(>|t|)"],3), nsmall=3)
+#print legend
+legend("top", paste0("p = ", pvalue), bty= "n", cex = 1.1)
+```
+
+
+## Conservation effort and active working time {#treatefforttime}
+
+Time not working was measured in the survey, where participants were asked to estimate and report the number of minutes they did not spend working (see \@ref(surv)). There is a significant correlation between spending less time actively working and producing fewer bags, but also considerable unexplained variance that can be attributed to differences in working intensity (speed) rather than working minutes.
+
+```{r fig.height = 3.75, fig.width = 4, fig.cap = "Scatter plot for time not spent working and outcome in the real-effort task. R² and F statistic from univariate linear regression are shown.", out.extra = "", fig.align = "center"}
+
+par(mar=c(4,4,1,1))
+df$minsbreak <- as.numeric(as.character(df$minsbreak))
+plot(df$minsbreak, df$bags,
+     xlab = "Reported time not working (min)",
+     ylab = "Conservation effort (No. of bags)",
+     yaxt="n", cex.axis = 0.9)
+axis(2, at = c(0,25,50,75,100,125), labels = c(0,25,50,75,100,125), cex.axis = 0.9)
+legend("topright",
+       paste("R² = ", round(summary(lm(df$bags ~ df$minsbreak))$r.squared, 3), ", F = ",
+             round(summary(lm(df$bags ~ df$minsbreak))$fstatistic[1], 1), " (df: ",
+             round(summary(lm(df$bags ~ df$minsbreak))$fstatistic[2], 0), ", ",
+             round(summary(lm(df$bags ~ df$minsbreak))$fstatistic[3], 0), ")", sep = ""),
+       bty="n", cex = 0.9)
+```
+
+
+## Effect of unequal treatment on fairness judgment {#fairness}
+
+```{r ord}
+#Model table: ordinal models with fairness variable as outcome
+mod_ord1 <- clmm2(fair_fct ~ grouptype, random = as.factor(village_ID), data = df, Hess = TRUE)
+mod_ord2 <- clmm2(fair_fct ~ grouptype + payrate, random = as.factor(village_ID), data = df, Hess = TRUE)
+mod_ord3 <- clmm2(fair_fct ~ grouptype * payrate, random = as.factor(village_ID), data = df, Hess = TRUE)
+
+ord_resultstab <- tibble(
+  "Variable" = c("1|2", "2|3", "3|4", "4|5", "Unequal", "High pay rate", "Unequal x high pay rate", "N", "Log likelihood"),
+  
+  "Model 1" = c(
+    paste(round(as.numeric(head(coef(mod_ord1),5)),3), " (", round(as.numeric(summary(mod_ord1)$coefficients[,2]),3), ")",
+          aster(summary(mod_ord1)$coefficients[,4]), sep =""),
+    "",
+    "",
+    nobs(mod_ord1),
+    round(mod_ord1$logLik,3)),
+  
+  "Model 2" = c(
+    paste(round(as.numeric(head(coef(mod_ord2),6)),3), " (", round(as.numeric(summary(mod_ord2)$coefficients[,2]),3), ")",
+          aster(summary(mod_ord2)$coefficients[,4]),sep =""),
+    "",
+    nobs(mod_ord2),
+    round(mod_ord2$logLik,3)),
+
+  "Model 3" = c(
+    paste(round(as.numeric(head(coef(mod_ord3),7)),3), " (", round(as.numeric(summary(mod_ord3)$coefficients[,2]),3), ")",
+          aster(summary(mod_ord3)$coefficients[,4]),sep =""),
+    nobs(mod_ord3),
+    round(mod_ord3$logLik,3))
+  )
+
+ord_resultstab %>% kable(booktab = T,
+                         linesep = c(rep("",3), "\\addlinespace", rep("",2), "\\addlinespace"),
+                         align = "l",
+                         caption = "Results from ordinal mixed-effect models on the effect of unequal payments on the survey measure of fairness judgment (1-5, higher values indicate higher perceived fairness of one's own pay rate) with village as a random effect. Estimated threshold coefficients and coefficients for predictors are shown with standard errors in parentheses. Coefficients for predictors are the ordered log-odds of giving a higher fairness rating.") %>%
+  kable_styling(latex_options = c("HOLD_position"), position="left") %>%
+  add_footnote("*p<0.1, **p<0.05, ***p<0.01", notation="none")
+```
+
+## Vignette results {#vign}
+
+Table \@ref(tab:vig) shows the distribution of responses for all four vignettes. The full text of the vignettes can be found in the survey questions (see \@ref(surv)). Vignettes 1, 2, 3 and 4 closely follow scenarios 1A, 1B, 1C and 1G, respectively, from @konow_positive_1996. The results are similar to those from a US sample reported in @konow_positive_1996, where proportions choosing the response 'Fair' were 74%, 19%, 90% and 24% in vignettes 1, 2, 3 an 4, respectively.
+
+```{r vig}
+vig <- tibble(
+  Vignette    = c(1,2,3,4),
+  "Response 'Fair' (N, %)" = c(paste(table(df$vignette1)[1], " (", round(prop.table(table(df$vignette1))[1],3)*100,")", sep=""),
+                         paste(table(df$vignette2)[1],  " (", round(prop.table(table(df$vignette2))[1],3)*100,")", sep=""),
+                         paste(table(df$vignette3)[1],  " (", round(prop.table(table(df$vignette3))[1],3)*100,")", sep=""),
+                         paste(table(df$vignette4)[1],  " (", round(prop.table(table(df$vignette4))[1],3)*100,")", sep="")),
+  "Response 'Unfair' (N, %)" = c(paste(table(df$vignette1)[2], " (", round(prop.table(table(df$vignette1))[2],3)*100,")", sep=""),
+                         paste(table(df$vignette2)[2],  " (", round(prop.table(table(df$vignette2))[2],3)*100,")", sep=""),
+                         paste(table(df$vignette3)[2],  " (", round(prop.table(table(df$vignette3))[2],3)*100,")", sep=""),
+                         paste(table(df$vignette4)[2],  " (", round(prop.table(table(df$vignette4))[2],3)*100,")", sep="")),
+  "Response in line with AP" = c("'Fair'","'Unfair'","'Fair'","'Unfair'"),
+  "p-value (test of proportions)" = c(prop.test(table(df$vignette1), correct=F)$p.value,
+                                      prop.test(table(df$vignette2), correct=F)$p.value,
+                                      prop.test(table(df$vignette3), correct=F)$p.value,
+                                      prop.test(table(df$vignette4), correct=F)$p.value))
+
+vig %>% kable(booktab = T, linesep = "", align = "l", digits = 4, caption = "Results for survey questions on the endorsement of the accountability principle (AP).") %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), position="left")
+```
+
+## Open-ended question on fairness of pay {#reason}
+
+After rating the fairness of their own pay rate on a five-point scale in the post-experimental survey, participants were asked *"Why and what do you think about it?"*. (see \@ref(surv)). We did this to get a better of idea of people's perception of fairness regarding the task and treatment manipulations. Non-response was comparably high for this question (`r round(sum(is.na(df$fair_why))/nrow(df)*100,0)`% missing). Open-ended responses werde translated from Vietnamese to English and coded inductively. First, two authors (LL, SG) separately sampled 50 responses each and then jointly developed a coding scheme with code definitions and examples. Then, both coded all responses following this scheme, being blinded for treatment assignment and allowing for a maximum of two codes per respondent. Intercoder agreement was 84%. A discussion on differing codings led to further refinement of the code definitions. All disagreements were resolved via discussion. The final coding scheme and counts of responses are shown in Table \@ref(tab:reasontab). Figure \@ref(fig:whydistr) shows counts by treatment and fairness judgment (the five-point scale was binarized due to heavy skew towards high fairness judgments, see Figure 4B in main text). We also derived broader categories for the 12 detailed codes, dependent on what participants referred to in their response, see column "Reference for fairness judgment" in Table \@ref(tab:reasontab). We plot these broader categories for participants from equal and unequal groups separately in Figure \@ref(fig:whydistrref).
+
+\newpage
+\blandscape
+
+```{r reasontab}
+#create table with codes of open responses (max. two per participant)
+df_why <- tibble(
+  grouptype = rep(df$grouptype, 2),
+  payrate   = rep(df$payrate, 2),
+  treatment = rep(df$treatment,2),
+  fair      = rep(df$fair,2),
+  code      = c(df$fair_why_code1, df$fair_why_code2)
+)
+
+df_why %>%
+  drop_na(code) -> df_why
+
+#name codes
+df_why$code     <- as.character(df_why$code)
+df_why$code_nam <- recode_factor(df_why$code,
+              "1"  = "High pay (reference: experiment)",
+              "2"  = "Low pay (reference: experiment)",
+              "3"  = "Difference in pay rate",
+              "4"  = "Same pay rate",
+              "5"  = "High pay (reference: unspecified or outside exp.)",
+              "6"  = "Low pay (reference: unspecified or outside exp.)",
+              "7"  = "Depends on own effort",
+              "8"  = "Task opportunity for money",
+              "9"  = "Task easy/fun",
+              "10" = "Task useful/social/for research/for learning",
+              "11" = "Randomness/luck",
+              "12" = "Other",)
+
+#define bianry fairness judgment
+df_why$fair_bin <- ifelse(df_why$fair>=4, "Somewhat/very fair", "Undecided/not so/not at all fair")
+
+#aggregate summary
+df_why %>%
+  group_by(code_nam) %>%
+  summarise(res = paste0(length(code_nam), " (", round(length(code_nam)/sum(!is.na(df_why$code))*100,1), ")")) -> why
+
+why$definition <- c(
+  "...the comparison to other pay rate(s) of the experiment that are lower",
+  "...the comparison to other pay rate(s) of the experiment that are higher",
+  "...the fact that pay rates in the experiment were different, not mentioning own pay rate",
+  "...the fact that pay rates in the experiment were the same, not mentioning own pay rate",
+  "...the pay rate being perceived as generally reasonable / high without referring to experiment pay rate(s) as a comparison, but sth. else or nothing",
+  "...the pay rate being perceived as generally unreasonable / low without referring to experiment pay rate(s) as a comparison, but sth. else or nothing",
+  "...the fact that total payments depended on the own effort",
+  "...the opportunity to work for income / money",
+  "...the simplicity or joy of the activity",
+  "...the overall usefulness or sociality of the activity, or its value for research and learning",
+  "...the fact that participants themselves were responsible for drawing their pay rate",
+  "... anything else")
+
+why$reference <- c(
+ rep("Others' pay rates in the experiment", 4),
+ rep("Pay rates or total payments in general", 4),
+ rep("Task characteristics", 2),
+ "Process of pay rate assignment",
+ "-")
+
+#add explanations and example
+why <- as_tibble(cbind(seq(1:nrow(why)),
+                       why[,1],
+                       why[,3],
+                       c(paste0("'", df$fair_why[df$ID == 204], "'"),
+                         paste0("'", df$fair_why[df$ID == 132], "'"),
+                         paste0("'", df$fair_why[df$ID == 64],  "'"),
+                         paste0("'", df$fair_why[df$ID == 283], "'"),
+                         paste0("'", df$fair_why[df$ID == 66],  "'"),
+                         paste0("'", df$fair_why[df$ID == 219], "'"),
+                         paste0("'", df$fair_why[df$ID == 295], "'"),
+                         paste0("'", df$fair_why[df$ID == 89],  "'"),
+                         paste0("'", df$fair_why[df$ID == 123], "'"),
+                         paste0("'", df$fair_why[df$ID == 170], "'"),
+                         paste0("'", df$fair_why[df$ID == 159], "'"),
+                         paste0("'", df$fair_why[df$ID == 264], "'")
+                         ),
+                       why[,4],
+                       why[,2]))
+
+
+names(why) <- c("Code no.", "Response", "Definition: Fairness judgment is based on...", "Example", "Reference for fairness judgment", "N (%)")
+why %>%
+  kable(booktab = T, align = "l", caption = "Coding of responses for the open-ended survey question 'Why and what do you think about it?' that followed the quantitative fairness judgment of the participant's own pay rate.") %>%
+  column_spec(1, width = "0.5cm") %>%
+  column_spec(2, width = "2cm") %>%
+  column_spec(3, width = "6.5cm") %>%
+  column_spec(4, width = "5cm") %>%
+  column_spec(5, width = "5cm") %>%
+  column_spec(6, width = "1.75cm") %>%
+  kable_styling(latex_options = c("HOLD_position"), position="left", font_size = 8)
+```
+
+\newpage
+
+```{r whydistr, fig.height = 6, fig.width=10, fig.cap="Responses for the open-ended survey question 'Why and what do you think about it?' that followed the quantitative fairness judgment of the own pay rate, split by treatment and fairness judgment (max. two codings per response were allowed).", out.extra="", fig.align="center"}
+df_why$code_nam_no <- interaction(df_why$code_nam, df_why$code, sep = ": ", lex.order = T)
+
+fair_why_plot <- df_why %>%
+  ggplot(aes(x = code_nam_no)) +
+  geom_bar(stat = "count") +
+  geom_hline(aes(yintercept = 0), linetype = 2, size = 0.5) +
+  facet_wrap(~treatment + fair_bin, ncol = 4) +
+  labs(x = "Response", y = "Count") +
+  theme_bw() +
+  coord_flip()+
+  theme(strip.text = element_text(size = 8),
+        strip.background = element_rect(fill = "grey90"))
+
+fair_why_plot
+```
+
+\newpage
+
+```{r whydistrref, fig.height = 5.5, fig.width =9,  fig.cap="Responses for the open-ended survey question 'Why and what do you think about it?' that followed the quantitative fairness judgment of the own pay rate, categorized by what aspect of the experiment participants referred to in their response and split by equal vs unequal group and fairness judgment.", out.extra="", fig.align="center"}
+df_why$code_broad <- recode_factor(df_why$code,
+                                 "1"  = "Others' pay rates in the experiment",
+                                 "2"  = "Others' pay rates in the experiment",
+                                 "3"  = "Others' pay rates in the experiment",
+                                 "4"  = "Others' pay rates in the experiment",
+                                 "5"  = "Pay rates or total payments in general",
+                                 "6"  = "Pay rates or total payments in general",
+                                 "7"  = "Pay rates or total payments in general",
+                                 "8"  = "Pay rates or total payments in general",
+                                 "9"  = "Task characteristics",
+                                 "10" = "Task characteristics",
+                                 "11" = "Process of pay rate assignment",
+                                 "12" = "Other",)
+
+df_why$grouptype <- ifelse(df_why$grouptype=="equal", "Equal", "Unequal")
+df_why$fair <- as.factor(df_why$fair)
+df_why$fair <- recode_factor(df_why$fair,
+                             "5" = "Very",
+                             "4" = "Somewhat",
+                             "3" = "Undecided",
+                             "2" = "Not so",
+                             "1" = "Not at all")
+
+fair_why_plotref <- df_why %>%
+  ggplot(aes(x = fair, fill = code_broad)) +
+  geom_bar(stat = "count", position = "stack") +
+  geom_hline(aes(yintercept = 0), linetype = 2, size = 0.5) +
+  facet_wrap(~grouptype, ncol = 4) +
+  labs(x = "Fairness judgment", y = "Count") +
+  theme_bw() +
+  labs(title= "Why and what do you think about it?",
+       x = "Fairness judgment",
+       fill = "Response refers to...") +
+  theme(
+        axis.title=element_text(size=13,face="bold"),
+        axis.text.x=element_text(size = 11),
+        axis.text.y=element_text(size = 12),
+        strip.text = element_text(size = 12),
+        legend.title=element_text(size=12, face ="bold"),
+        legend.text=element_text(size=11),
+        legend.position = "top",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        plot.title = element_text(size = 13, face = "italic"),
+        strip.background = element_rect(fill = "grey90"))+
+  scale_fill_manual(values = c(
+    "#fbb4ae",
+    "#b3cde3",
+    "#ccebc5",
+    "#decbe4",
+    "#fed9a6")) +
+  guides(fill=guide_legend(nrow=3,byrow=TRUE))
+
+fair_why_plotref
+```
+
+\elandscape
+\newpage
+
+The open-ended question gave insights about how participants perceived the treatments and task (see also Figures \@ref(fig:whydistr), \@ref(fig:whydistrref) and Table \@ref(tab:reasontab)):
+
+- Fairness judgments were often high because people thought the task was easy, sociable, useful or generally a way to generate income (code no. 8, 9, 10), e.g.: "`r df$fair_why[df$ID == 54]`" or: "`r df$fair_why[df$ID == 362]`".
+
+- In contrast, those judging payment as unfair referred almost exclusively to pay rate differences in the experiment or to differences in payments or pay rate compared to outside the experiment (code no. 1, 2, 3, 4, 5, 6, 7, 8). In both distributional treatments (equal and unequal), the reference to payment rate inequality within the experiment was highest when judging the paymen as unfair (not so fair / not fair at all).
+
+- Low-paid participants in unequal groups gave a low fairness overwhelmingly because they did not like the pay disparities (code no. 3) or because their pay rate was too low in general (code no. 6) or compared to others (code no. 2), e.g.: "`r df$fair_why[df$ID == 319]`" or: "`r df$fair_why[df$ID == 296]`".
+
+- Also among the advantaged participants in unequal groups  (albeit substantially less than among disadvantaged participants in unequal groups) some thought that their pay rate was unfair due to pay disparities (code no. 3), e.g.: "`r df$fair_why[df$ID == 263]`".
+
+- Most advantaged participants in unequal groups who thought their payment was very or somwhat fair did so because they found their pay rate was high (code no. 5), with some making explicit reference to being advantaged over others (code no. 1): "`r df$fair_why[df$ID == 161]`"
+
+- Even within the same treatment, there was considerable heterogeneity in what people thought about the absolute level of their pay rate (code no. 5, 6), also reflected in the judgment on the fairness scale. For example, both of the following responses are from high-paid participants in equal groups: "`r df$fair_why[df$ID == 47]`" and "`r df$fair_why[df$ID == 239]`".
+
+- There were references to payment inequalities between participants (code no. 1, 2, 3) even in treatments with equal groups (albeit much less than in unequal groups), where this should not be expected. Remember that equal groups did not know that another pay rate than their own existed. The most likely explanation is that some people from different groups talked to each other *after* participating in the real-effort task but *before* taking the survey. This is evident in one of the responses: "`r df$fair_why[df$ID == 88]`". We tried to prevent mixing of participants after the task, but this was difficult in some villages where the groups could not be seated very far away from each other (in any case, this could not influence the result of the incentivized experiment).
+
+- For some disadvantaged participants, the personal accountability for their *total number of bags* (based on their own effort; code no. 7) was way more salient than the lack of accountability for their *pay rate per bag* (based on luck). They gave a high fairness rating, for example based on the following reasoning: "`r df$fair_why[df$ID == 160]`". Some people in other treatments had similar views and gave high fairness ratings with, for example, following explanations: "`r df$fair_why[df$ID == 70]`" or: "`r df$fair_why[df$ID == 360]`".
+
+- While we expected and were able to show that our treatment manipulation - assigning pay rates purely based on luck rather than deservingness - violated local fairness norms of accountability, we also found deviating concpetualizations of fairness for some participants. For example, some disadvantaged participants thought that payments were very or somewhat fair because they were themselves accountable for their bad luck in drawing the envelope with their pay rate (code no. 11), giving for example the following reason: "`r df$fair_why[df$ID == 159]`". One participant even gave the following reason for a high fairness judgment (code no. 12): "`r df$fair_why[df$ID == 26]`". Both views are contrary to vignette results (see see \@ref(vign)), where the majority of people stated that inequalities due to factors not under undividual control (born with one hand instead of two, see \@ref(surv)), as compared to those that are under individual control (choosing to work slower, see \@ref(surv)), are unfair. Strikingly, one participant in the sample thought that gender equality in pay was unfair (code no. 6): "`r df$fair_why[df$ID == 412]`".
+
+- We also found evidence in the responses that participants had opposing predictions of the effect of high absolute pay rates on conservation effort. Some stated that giving more money makes them work more: "`r df$fair_why[df$ID == 397]`". Some believe that the opposite would happen, e.g.: "`r df$fair_why[df$ID == 110]`".
+
+## World Values Survey data on fairness expectation {#wvsfair}
+
+Table \@ref(tab:wvs) shows World Values Survey responses to the question *"Do you think most people would try to take advantage of you if they got a chance, or would they try to be fair?"* averaged across all countries and survey waves available from the World Value Survey. Responses are on a 10-point scale from *"Would take advantage"* (= 1) to *"Try to be fair"* (= 10). The original aggregated data-file (1981-2014) was retrieved from *http://www.worldvaluessurvey.org/* in February 2020.
+
+\newpage
+
+```{r wvs}
+df3 %>% kable(booktab = T, linesep = "", digits = 3, align = "l",
+               caption = "Country-level responses to the question 'Do you think most people would try to take advantage of you if they got a chance, or would they try to be fair?' from the World Values Survey. Higher values indicate a higher expectation to be treated fairly on a scale from 1 to 10.") %>% 
+   kable_styling(latex_options = c("HOLD_position"), position="left", font_size = 6)
+```
+
+```{r, include = FALSE}
+#Calculations of further results from the main text
+
+### p-value for comparison of observed proportion >=3 with proportion expected under chance in results section of main text
+df$accountab_bin <- ifelse(df$accountab >= 3, ">=3", "<3")
+
+binom.test(x = rev(table(df$accountab_bin)),
+           n = sum(table(df$accountab_bin)),
+           p = pbinom(q = 2, size = 4, prob = 0.5, lower.tail = FALSE))
+
+### proportions and p-values for responses to open-ended questions in results section of main text
+addmargins(table(df_why$grouptype, df_why$code_broad=="Others' pay rates in the experiment"))
+chisq.test(table(df_why$grouptype, df_why$code_broad=="Others' pay rates in the experiment"))
+addmargins(table(df_why$grouptype, df_why$code_broad=="Others' pay rates in the experiment" & df_why$fair %in% c("Undecided", "Not so", "Not at all")))
+chisq.test(table(df_why$grouptype, df_why$code_broad=="Others' pay rates in the experiment" & df_why$fair %in% c("Undecided", "Not so", "Not at all")))
+
+### proportions for responses to open-ended questions in discussion section of main text
+addmargins(prop.table(table(df_why$code_broad)))
+```
+
+# Supplementary Bibliography
