@@ -1,5 +1,5 @@
 # fairconservation
-R Code and data for reproducing the analysis and figures of the article *Fair payments for effective environmental conservation* by by Lasse Loft, Stefan Gehrig, Carl Salk, Jens Rommel.  
+R Code and data for reproducing the analysis and figures of the article *Fair payments for effective environmental conservation* by Lasse Loft, Stefan Gehrig, Carl Salk, Jens Rommel.  
   
 *May 2020*
 
