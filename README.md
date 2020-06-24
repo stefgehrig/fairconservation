@@ -1,7 +1,7 @@
 # fairconservation
 R Code and data for reproducing the analysis and figures for the article:  
-  
-Loft, L., Gehrig, S., Salk, C., & Rommel, J. (2020). Fair payments for effective environmental conservation. *Proceedings of the National Academy of Sciences.* https://doi.org/10.1073/pnas.1919783117  
+ 
+Loft, L., Gehrig, S., Salk, C., & Rommel, J. (2020). Fair payments for effective environmental conservation. *Proceedings of the National Academy of Sciences, 117*(25), 14094–14101. https://doi.org/10.1073/pnas.1919783117
   
 *May 2020*
 
