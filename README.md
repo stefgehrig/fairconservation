@@ -20,7 +20,7 @@ All other R scripts in this directory are **helper scripts** which get loaded in
 - `cite_style.csl`
 - `references.bib`
 
-...as well as four image files that contain no data (pictures of field work and experimental materials).  
+...as well as four image files (pictures of field work and experimental materials).  
   
 Three **data files** are contained in this repository:
 
@@ -30,10 +30,10 @@ Three **data files** are contained in this repository:
   
 The script `supplementary_information.Rmd` uses all three data files, whereas the script `figures.R` uses only the first one.  
   
-A **data dictionary** for the major data sheet `exp_data.csv` is contained in the file
+A **data dictionary** for the main data sheet `exp_data.csv` is contained in the file
   
 - `exp_data_dictionary.xlsx`
   
-Further details on all questionnaire-based variables can be found in the Supplementary Information where the original questionnaire is shown.  
+Further details on all questionnaire-based variables can be found in the Supplementary Information.
   
 For remarks, errors or questions, please contact *stefan-gehrig[at]t-online.de*.
