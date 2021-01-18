@@ -49,8 +49,8 @@ library(lmtest)
 library(lubridate)
 
 #load functions
-source("function_permutationtest.R")
-source("function_standardcoeff.R")
+source("functions/function_permutationtest.R")
+source("functions/function_standardcoeff.R")
 
 #define functions
 #...for asterics in regression table
@@ -81,9 +81,9 @@ p4digits <- function(x){
   paste("p = ",format(round(x, digits=4), nsmall = 4), sep = "")}
   
 #import data
-df  <- read_csv("exp_data.csv") #experimental data
-df2 <- read_csv("vil_data.csv") #administrative village data
-df3 <- read_csv("wvs_data.csv") #world values survey data aggregated
+df  <- read_csv("data/exp_data.csv") #experimental data
+df2 <- read_csv("data/vil_data.csv") #administrative village data
+df3 <- read_csv("data/wvs_data.csv") #world values survey data aggregated
 
 #define new variables
 df <- df %>% 
@@ -239,7 +239,7 @@ The areas where tasks were conducted were generally located in the shade to ensu
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=4in]{imageTasksetup.png}
+\includegraphics[width=4in]{images/imageTasksetup.png}
 \caption{Examples of task setups for two groups in two different villages.}
 \label{fig:setupexample}
 \end{figure}
@@ -308,13 +308,13 @@ I have read (or it has been read out for me) and understood the content of the s
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=3.5in]{sheetEqual.png}
+\includegraphics[width=3.5in]{images/sheetEqual.png}
 \caption{Information sheet about own payment and payment of others in a group with equal pay rates, handed to participants in closed envelopes (left: sheet for high pay rate; right: sheet for low pay rate).}
 \end{figure}
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=3.5in]{sheetUnequal.png}
+\includegraphics[width=3.5in]{images/sheetUnequal.png}
 \caption{Information sheet about own payment and payment of others in a group with unequal pay rates, handed to participants in closed envelopes (left: sheet for high pay rate; right: sheet for low pay rate).}
 \end{figure}
 
@@ -431,7 +431,7 @@ For each participant in the experiment, village, date and ID were recorded and t
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=7in]{sheetScenarios.png}
+\includegraphics[width=7in]{images/sheetScenarios.png}
 \caption{Visual aids for vignettes 1-4 of question 23 in the survey (Vietnamese).}
 \label{fig:vignaid}
 \end{figure}

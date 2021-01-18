@@ -9,7 +9,7 @@ library(ggplot2)
 library(cowplot)
 
 #Load adapted raincloud function
-source("function_raincloudplot.R")
+source("functions/function_raincloudplot.R")
 
 #Import data
 df  <- read_csv("exp_data.csv") #experimental data
