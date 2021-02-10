@@ -1641,8 +1641,10 @@ boxplot(df$bags_demean~df$protect,
 title(ylab = "Conservation effort (No. of bags)\n(demeaned for treatment)",
  line = 2.7)
 
-title(xlab = substitute(paste(italic("Do you take part in\npatrolling, monitoring, firefighting\nor any other activities for the protection of the forest?"))),
-line = 5)
+title(xlab = substitute(paste(italic("Do you take part in patrolling, monitoring,
+    firefighting or any other activities for
+           the protection of the forest?"))),
+      line = 5)
 
 effort_protect_exp <- df %>%
   lmer(formula(paste("bags ~", "grouptype + protect +",
